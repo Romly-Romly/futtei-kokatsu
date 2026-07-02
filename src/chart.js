@@ -805,7 +805,7 @@ function drawBurndown(draw, view, redraw) {
 	const visible = (t) => t >= view.t0 - 1e-9 && t <= view.t1 + 1e-9;
 	const visibleV = (v) => v >= view.v0 - 1e-9 && v <= view.v1 + 1e-9;
 
-	const svg = el("svg", { viewBox: `0 0 ${vbw} ${vbh}`, width: "100%", height: "100%", role: "img", style: "display:block; position:absolute; top:0; left:0; cursor:grab; touch-action:none" });
+	const svg = el("svg", { viewBox: `0 0 ${vbw} ${vbh}`, width: "100%", height: "100%", role: "img" });
 
 	const clipId = "clip-" + draw.id;
 	const defs = el("defs", {}, svg);

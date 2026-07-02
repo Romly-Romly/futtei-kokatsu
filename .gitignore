@@ -20,3 +20,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code のローカル設定
+.claude/

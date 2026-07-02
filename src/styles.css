@@ -715,6 +715,18 @@ button:disabled {
 	position: relative;
 }
 
+/* SVG のフィル配置。CSP(default-src 'self')がインライン style 属性を禁じるため、この指定はインラインではなくスタイルシートで与える。絶対配置で .chart を敷き詰めて SVG をレイアウトの寸法計算から外し、フロー内の固有高さが .chart の高さへ回り込むのを防ぐ。cursor/touch-action はドラッグ操作のために添える。 */
+.chart > svg {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 100%;
+	display: block;
+	cursor: grab;
+	touch-action: none;
+}
+
 .heatmap {
 	flex: 1;
 	width: 100%;
