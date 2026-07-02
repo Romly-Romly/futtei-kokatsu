@@ -1,0 +1,41 @@
+[package]
+name = "futtei-kokatsu"
+version = "1.0.0"
+description = "Claude の利用量（週次・セッションの消費率）を見張る常駐ツール"
+authors = ["Romly"]
+license = "GPL-3.0-only"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "futtei_kokatsu_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [ "tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+tiny-skia = "0.11"
+
+# トレイの小アイコン寸法を現在の DPI から測り、Mica を使える Windows 11 かをビルド番号で見分け、OS のアクセント色をレジストリから読むために Win32 を直接呼ぶ。tray-icon が使う版に合わせて windows-sys のバージョン重複を避ける。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_System_Registry", "Wdk_System_SystemServices"] }
+
+# macOS では透過ウィンドウ(transparent: true)の実現に private API が要るため、macos-private-api フィーチャを macOS 標的にのみ足す。Windows のビルドには含めない。tauri.macos.conf.json の app.macOSPrivateApi と対で機能する。
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+
+# 二重起動を防ぎ、二個目の起動を一個目のウィンドウ復帰へ変えるプラグイン。デスクトップ専用のためモバイル標的を除いて依存させる。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+# ログイン時の自動起動を担うプラグイン。Windows ではレジストリの Run キーを登録・解除する。同じくデスクトップ専用。
+tauri-plugin-autostart = "2"
+

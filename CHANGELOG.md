@@ -1,0 +1,7 @@
+# Changelog
+
+> 🌐 **[日本語 →](CHANGELOG.ja.md)**
+
+## [1.0.0] - 2026-06-30
+
+- Initial release.

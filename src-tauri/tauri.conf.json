@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Futtei-Kokatsu",
+  "mainBinaryName": "FutteiKokatsu",
+  "version": "1.0.0",
+  "identifier": "com.romly.futteikokatsu",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "払底枯渇",
+        "width": 800,
+        "height": 600,
+        "minWidth": 480,
+        "minHeight": 520,
+        "visible": false,
+        "transparent": true,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Romly",
+    "copyright": "© 2026 Romly",
+    "license": "GPL-3.0-only",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "./nsis/hooks.nsh"
+      }
+    }
+  }
+}

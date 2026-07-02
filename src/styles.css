@@ -1,0 +1,956 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Copyright (C) 2026 Romly */
+
+/* 設定アイコンに使う自作グリフのフォント。 */
+@font-face {
+	font-family: "romoji";
+	src: url("../assets/romoji.ttf") format("truetype");
+}
+
+:root {
+	/* UI フォントは system-ui を主軸に OS の既定 UI フォント(Windows は Segoe UI、macOS は San Francisco)へ追従させる。総称名なので、相手 OS のフォントが入っていても名前の一致で別 OS のフォントへ化けることがない。和字は system-ui に含まれないためグリフ単位のフォールバックで補い、Windows は Yu Gothic UI、macOS は Hiragino Sans が当たる。この2つは OS 間で実体が重ならないので、列挙順に関わらず各 OS の和文フォントだけが選ばれる。 */
+	font-family: system-ui, "Yu Gothic UI", "Hiragino Sans", sans-serif;
+	font-size: 16px;
+	line-height: 1.5;
+	font-weight: 400;
+
+	color: #0f0f0f;
+	/* 地色は塗らず透過にして、ウィンドウへ当てたシステム背景(Mica/Acrylic)が透けて見えるようにする。Light/Dark の地の明暗は Mica とタイトルバーが担う。 */
+	background-color: transparent;
+
+	/* 配色のライト・ダーク双方にページが対応すると UA へ伝える。これで OS のアクセント色を表す system-color(AccentColor 等)が現在のテーマで解決され、スクロールバー等の UA 描画もテーマに揃う。明暗自体は prefers-color-scheme とウィンドウの Mica が担う。 */
+	color-scheme: light dark;
+
+	font-synthesis: none;
+	text-rendering: optimizeLegibility;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+
+	--chart-grid: rgba(0, 0, 0, 0.08);
+	--chart-faint: #9a9aa2;
+	--chart-sub: #6b6b6b;
+	--chart-line: #2b8fd0;
+	--chart-area: rgba(43, 143, 208, 0.12);
+	--chart-warn: #d6453a;
+	--chart-ok: #2e9e5b;
+	--chart-wall: #b0b0b8;
+	--chart-now: #222222;
+	/* UI の選択・オン状態を示すアクセント色。CSS の system-color である AccentColor は WebView2(Windows)・WKWebView(macOS) とも OS のアクセントカラーへ解決するため、Rust を介さず権限も増やさずに OS のアクセントへ追従できる。AccentColorText は同じ OS がアクセント上の文字色に選ぶ対比色で、明るいアクセント色のとき文字が潰れるのを避ける。グラフやステータスの色は意味に紐付くためここへは含めず固定する。 */
+	--accent: AccentColor;
+	--accent-text: AccentColorText;
+	/* セッション・週間パネルと消費傾向カードで共有するカードの角丸。3枚とも同じ半径に揃える。 */
+	--card-radius: 6px;
+	/* 記録が無いセルの色。データの有無だけを示す薄い地色なので、Light/Dark で明暗を入れ替える(下のメディアクエリで上書き)。 */
+	--heat-empty: rgba(0, 0, 0, 0.02);
+	/* 消費ランプの最暗色。記録はあるが未消費のセルを半透明で塗るのに使う。データ強度を表す色なので Light/Dark で固定する。 */
+	--heat-zero: rgb(31, 58, 74);
+	/* ヒートマップセルの角丸。一日の左端・右端にだけ当てる。 */
+	--heat-radius: 3px;
+	/* ヒートマップの行(=セル)の高さ。曜日ラベルと時刻ヘッダの行もこれに揃えて畳む。 */
+	--heat-cell-height: 11px;
+	/* 曜日ラベルの文字サイズ。 */
+	--heat-cell-fontsize: 0.5rem;
+	/* 時刻ヘッダの文字サイズ。補助情報なので曜日より一回り小さくする。 */
+	--heat-hour-fontsize: 0.5rem;
+	/* 消費傾向(ヒートマップ)カードの高さの上限。窓を高くするとセルがこの高さまで伸びて止まり、これを超えるぶんの縦余白はバーンダウン側へ回る。 */
+	--trend-max-height: 280px;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	height: 100vh;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	/* UI 全体はネイティブアプリのクロムとして扱い、テキスト選択を禁じる。ラベルや数字がドラッグで青く反転する Web 然とした挙動を消し、地のカーソルも I-beam ではなく矢印にする。選択させたい箇所が出たら、その要素で user-select を text へ戻す。macOS の WKWebView(WebKit)は -webkit- 付きでないと効かないため、プレフィックス付きを併記する。 */
+	-webkit-user-select: none;
+	user-select: none;
+	cursor: default;
+}
+
+/* OS 標準のタイトルバーを外したぶん、ウィンドウ上端へ自前のタイトルバーを置く。地は透過のまま(Mica が透ける)。左がドラッグ領域、右にキャプションボタン(最小化・最大化・閉じる)を並べる。 */
+.titlebar {
+	flex-shrink: 0;
+	height: 32px;
+	display: flex;
+	align-items: stretch;
+}
+
+.titlebar-drag {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	padding-left: 12px;
+	min-width: 0;
+}
+
+/* タイトルバー左上のゲージ。トレイ・タスクバーと同じ消費率アイコンをここへも出す。canvas は実画素で描き、表示は 16px 角へ収める。データが無い間や非対応プラットフォームでは hidden で隠す。 */
+.titlebar-gauge {
+	flex-shrink: 0;
+	width: 16px;
+	height: 16px;
+	margin-right: 8px;
+}
+
+.titlebar-title {
+	font-size: 0.72rem;
+	font-weight: 500;
+	color: #3a3a3a;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.titlebar-controls {
+	display: flex;
+	flex-shrink: 0;
+}
+
+/* キャプションボタン。Win11 の標準寸法(46x32)に倣い、ホバーで淡い面を敷く。閉じるだけ赤面にする。OS 標準ボタンと同じく矢印カーソルのままにする。 */
+.tb-btn {
+	appearance: none;
+	border: none;
+	border-radius: 0;
+	box-shadow: none;
+	background-color: transparent;
+	width: 46px;
+	height: 32px;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: #1a1a1a;
+	cursor: default;
+	transition: background-color 0.12s;
+}
+
+.tb-ico {
+	font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+	font-size: 10px;
+	line-height: 1;
+}
+
+.tb-btn:hover {
+	background-color: rgba(0, 0, 0, 0.06);
+}
+
+.tb-close:hover {
+	background-color: #c42b1c;
+	color: #ffffff;
+}
+
+/* macOS では OS の信号機ボタン(閉じる・最小化・最大化)を左上へ重ねて表示する(tauri.macos.conf.json の titleBarStyle: Overlay)。自前のキャプションボタンは重複するため隠す。 */
+.is-mac .titlebar-controls {
+	display: none;
+}
+
+/* 左上へ重なる信号機ボタンと、ゲージ・タイトルが重ならないよう、ドラッグ領域の左を信号機ボタンのぶん空ける。 */
+.is-mac .titlebar-drag {
+	padding-left: 76px;
+}
+
+/* タイトルバーの下のウィンドウ本体。ここだけを縦スクロールさせ、タイトルバーは常に上端へ留める。表示中のビュー(メイン/設定)を縦flexの子として高さいっぱいに広げ、メインのチャート群が縦の余白を吸えるようにする。 */
+.window-body {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	overflow-y: auto;
+	/* スクロールバーは細く控えめにし、つまみだけ半透明のグレーで地に馴染ませる。溝は透かしてシステム背景を見せる。標準プロパティで指定し、各 OS の既定の振る舞い(macOS のオーバーレイ表示等)を尊重する。 */
+	scrollbar-width: thin;
+	scrollbar-color: rgba(0, 0, 0, 0.28) transparent;
+}
+
+/* hidden 属性での表示切り替えを、display を明示した要素(.app などの flex 容器)にも効かせる。 */
+[hidden] {
+	display: none !important;
+}
+
+/* フォーカスの輪郭はキーボード操作のときだけ見せ、OS 追従のアクセント色で統一する。マウス押下などキーボード以外で付いたフォーカスにはブラウザ既定の輪郭を出さない。 */
+:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+	outline: none;
+}
+
+/* 排他選択は容器が overflow:hidden で外側を切るため、輪郭を内側へ寄せて切れないようにする。 */
+.segmented button:focus-visible {
+	outline-offset: -2px;
+}
+
+/* キャプションボタンは窓の上端に接するため、輪郭を内側へ寄せて窓外でのはみ出し・切れを防ぐ。 */
+.tb-btn:focus-visible {
+	outline-offset: -2px;
+}
+
+/* スイッチは実体の input を隠しているので、その輪郭は出さず、見えるトラック側へフォーカスの輪郭を移す。 */
+.switch input:focus-visible {
+	outline: none;
+}
+
+.switch input:focus-visible + .track {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+/* メイン表示の本体。デスクトップの窓に合わせ、中央寄せの固定幅にせず窓いっぱいに広げる。横へ広がるほどバーンダウンは同じ期間を広い横幅で描く。flex:1 でウィンドウ本体の高さいっぱいに広がり、余白はチャート群へ配る。min-height は既定の auto のままにして、窓が低いときは内容なりの高さを保ち、ウィンドウ本体側でスクロールさせる。 */
+.app {
+	flex: 1;
+	padding: 20px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+
+.app-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+/* ヘッダの設定ボタン。本文ボタンと同じ装いでアイコンを1つ収める。 */
+.icon-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0.35em 0.5em;
+	line-height: 0;
+}
+
+/* romoji フォントのグリフを1文字収めるアイコン。 */
+.ico {
+	font-family: "romoji";
+	font-style: normal;
+	font-weight: normal;
+	line-height: 1;
+	font-size: 18px;
+}
+
+/* 設定ビュー。メインの内容を設定画面へ切り替えて見せる。中央寄せと余白はメイン画面に合わせる。 */
+.settings-view {
+	padding: 12px 16px 24px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+/* 戻るボタンはウィンドウの左上隅へ置き、設定本体は中央寄せの列に独立して並べる。 */
+.back-btn {
+	align-self: flex-start;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 0.4em 0.8em;
+	font-size: 0.85rem;
+}
+
+.settings-title {
+	margin: 0;
+	font-size: 1.2rem;
+	font-weight: 600;
+}
+
+.settings-body {
+	width: 100%;
+	max-width: 720px;
+	margin: 0 auto;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+/* WinUI の SettingsCard に倣い、左に項目名と説明、右にコントロールを置く1枚のカード。 */
+.card {
+	border: 1px solid rgba(0, 0, 0, 0.1);
+	border-radius: 11px;
+	background-color: #ffffff;
+}
+
+.row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 14px 16px;
+}
+
+.row-text {
+	min-width: 0;
+}
+
+.row-title {
+	font-size: 0.9rem;
+	font-weight: 600;
+}
+
+.row-desc {
+	margin-top: 3px;
+	font-size: 0.78rem;
+	color: #6b6b6b;
+}
+
+.row-control {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-shrink: 0;
+}
+
+/* 排他選択の小さな切り替えボタン群(テーマ・言語・日付形式)。 */
+.segmented {
+	display: inline-flex;
+	border: 1px solid rgba(0, 0, 0, 0.14);
+	border-radius: 8px;
+	overflow: hidden;
+}
+
+.segmented button {
+	appearance: none;
+	border: none;
+	border-radius: 0;
+	box-shadow: none;
+	background-color: #ffffff;
+	color: #0f0f0f;
+	padding: 0.4em 0.8em;
+	font-size: 0.8rem;
+	cursor: pointer;
+	transition: background-color 0.15s;
+}
+
+.segmented button + button {
+	border-left: 1px solid rgba(0, 0, 0, 0.14);
+}
+
+.segmented button:hover {
+	background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.segmented button.active {
+	background-color: var(--accent);
+	color: var(--accent-text);
+}
+
+/* 帯入りのカラーパレット選択ドロップダウン。素の select では option へ帯を載せられないため自前で組む。閉じた時のボタンに選択中の名前と帯を出し、開くとリストへ各パレットの名前と帯が並ぶ。 */
+.combo {
+	position: relative;
+}
+
+.combo-trigger {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 176px;
+	padding: 0.4em 0.7em;
+	border: 1px solid rgba(0, 0, 0, 0.14);
+	border-radius: 8px;
+	background-color: #ffffff;
+	color: #0f0f0f;
+	font-size: 0.8rem;
+	cursor: pointer;
+}
+
+.combo-name {
+	flex: 1 1 auto;
+	text-align: left;
+	white-space: nowrap;
+}
+
+.combo-swatch {
+	flex: 0 0 auto;
+	width: 64px;
+	height: 12px;
+	border-radius: 3px;
+	/* 帯の端色がカード地と近いテーマで輪郭が消えないよう、内側へ細い枠を重ねる。 */
+	box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+.combo-caret {
+	flex: 0 0 auto;
+	width: 0;
+	height: 0;
+	border-left: 4px solid transparent;
+	border-right: 4px solid transparent;
+	border-top: 5px solid currentColor;
+	opacity: 0.6;
+}
+
+.combo-list {
+	position: absolute;
+	z-index: 20;
+	top: calc(100% + 4px);
+	right: 0;
+	min-width: 100%;
+	margin: 0;
+	padding: 4px;
+	list-style: none;
+	border: 1px solid rgba(0, 0, 0, 0.14);
+	border-radius: 8px;
+	background-color: #ffffff;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.combo-list[hidden] {
+	display: none;
+}
+
+.combo-option {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 8px;
+	border-radius: 6px;
+	cursor: pointer;
+}
+
+.combo-option:hover {
+	background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.combo-option[aria-selected="true"] .combo-name {
+	font-weight: 600;
+}
+
+.combo-option[aria-selected="true"] .combo-name::after {
+	content: "✓";
+	margin-left: 6px;
+	color: var(--accent);
+}
+
+.combo-trigger:focus-visible,
+.combo-option:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: -2px;
+}
+
+/* オン・オフのトグルスイッチ。 */
+.switch {
+	position: relative;
+	display: inline-block;
+	width: 42px;
+	height: 24px;
+	cursor: pointer;
+}
+
+.switch input {
+	opacity: 0;
+	width: 0;
+	height: 0;
+}
+
+.switch .track {
+	position: absolute;
+	inset: 0;
+	background-color: #c4c4c4;
+	border-radius: 999px;
+	transition: background-color 0.15s;
+}
+
+.switch .track::before {
+	content: "";
+	position: absolute;
+	width: 18px;
+	height: 18px;
+	left: 3px;
+	top: 3px;
+	background-color: #ffffff;
+	border-radius: 50%;
+	transition: transform 0.15s;
+}
+
+.switch input:checked + .track {
+	background-color: var(--accent);
+}
+
+.switch input:checked + .track::before {
+	transform: translateX(18px);
+}
+
+button {
+	appearance: none;
+	border-radius: 8px;
+	border: 1px solid;
+	/* 上辺・左右は淡く下辺だけ少し濃い非対称の境界で、面が地にわずかに乗って見える Fluent の段差を出す。浮き上がる影は敷かない。 */
+	border-color: rgba(0, 0, 0, 0.08) rgba(0, 0, 0, 0.08) rgba(0, 0, 0, 0.16);
+	padding: 0.4em 1em;
+	font-size: 0.9em;
+	font-weight: 500;
+	font-family: inherit;
+	color: #0f0f0f;
+	background-color: rgba(255, 255, 255, 0.7);
+	cursor: pointer;
+	transition: background-color 0.1s ease, border-color 0.1s ease, color 0.1s ease;
+}
+
+button:hover {
+	background-color: #ffffff;
+}
+
+button:active {
+	/* 押下時は面を平らに沈め、下辺の濃い境界を均し、文字も一段淡くして押し込まれた見えにする。 */
+	background-color: rgba(245, 245, 245, 0.6);
+	border-color: rgba(0, 0, 0, 0.08);
+	color: rgba(15, 15, 15, 0.55);
+}
+
+button:disabled {
+	cursor: default;
+	opacity: 0.5;
+}
+
+.status {
+	margin: 0;
+	min-height: 1.2em;
+	flex: 1;
+	text-align: right;
+	font-size: 0.85rem;
+	color: #6b6b6b;
+}
+
+.error-banner {
+	margin: 0;
+	padding: 7px 11px;
+	border-radius: 8px;
+	font-size: 0.82rem;
+	color: #c0392b;
+	background-color: rgba(192, 57, 43, 0.08);
+	border: 1px solid rgba(192, 57, 43, 0.25);
+}
+
+.panels {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+}
+
+.panel {
+	flex: 1;
+	margin: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 14px 14px 8px;
+	border: 1px solid rgba(0, 0, 0, 0.1);
+	border-radius: var(--card-radius);
+	background-color: rgba(0, 0, 0, 0.015);
+}
+
+.panel-cap {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.panel-name {
+	font-size: 0.85rem;
+	font-weight: 600;
+}
+
+.panel-meter {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.meter-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.meter-pct {
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
+.meter-track {
+	position: relative;
+	height: 10px;
+	border-radius: 5px;
+	background-color: #e2e2e2;
+	overflow: visible;
+}
+
+.meter-fill {
+	height: 100%;
+	border-radius: 5px 0 0 5px;
+	background-color: #9a9aa2;
+	transition: width 0.3s ease;
+}
+
+.meter-fill.ok {
+	background-color: #3aa675;
+}
+
+.meter-fill.warn {
+	background-color: #e0843a;
+}
+
+.meter-fill.idle {
+	background-color: #c2c2c2;
+}
+
+.meter-fill.full {
+	border-radius: 5px;
+}
+
+.meter-caret {
+	position: absolute;
+	top: -3px;
+	bottom: -3px;
+	width: 2px;
+	border-radius: 1px;
+	background-color: var(--chart-now);
+}
+
+.pill {
+	font-size: 0.7rem;
+	font-weight: 600;
+	padding: 1px 8px;
+	border-radius: 999px;
+	font-variant-numeric: tabular-nums;
+}
+
+.pill.warn {
+	background-color: rgba(214, 69, 58, 0.14);
+	color: #c0392b;
+}
+
+.pill.ok {
+	background-color: rgba(46, 158, 91, 0.16);
+	color: #2e7d4f;
+}
+
+.pill.idle {
+	background-color: rgba(120, 120, 120, 0.12);
+	color: #777777;
+}
+
+.meter-reset {
+	font-size: 0.8rem;
+	color: #6b6b6b;
+}
+
+.meter-remain {
+	font-variant-numeric: tabular-nums;
+}
+
+.charts {
+	flex: 1;
+	/* 窓が高いときはヒートマップもここまで伸び、上限に達したら残りの縦余白はバーンダウン側へ回る。min-height は既定の auto のままにして、窓が低いときは内容なりの高さ(現状のセル高)を保ち、潰さずにウィンドウ本体側でスクロールさせる。 */
+	max-height: var(--trend-max-height);
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+}
+
+.chart-card {
+	flex: 1;
+	margin: 0;
+	display: flex;
+	flex-direction: column;
+	padding: 14px 14px 8px;
+	border: 1px solid rgba(0, 0, 0, 0.1);
+	border-radius: var(--card-radius);
+	background-color: rgba(0, 0, 0, 0.015);
+}
+
+.chart-cap {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 8px;
+}
+
+.chart-name {
+	font-size: 0.85rem;
+	font-weight: 600;
+}
+
+.chart-wrap {
+	position: relative;
+	flex: 1;
+	min-height: 160px;
+	display: flex;
+	flex-direction: column;
+}
+
+.verdict {
+	position: absolute;
+	/* 文字の下端を、グラフ上端の線(100%グリッド)より 4px 上へ置く。100%の線は viewBox 上端から padT(18)の位置にあり、viewBox 高さは実測ピクセルと等しいため上端から 18px に描かれる。translateY(-100%) で下端を基準にするので、top を 14px(=18-4)に置けば文字高に依らず上端線との余白が一定になる。 */
+	top: 14px;
+	transform: translateY(-100%);
+	/* 右端をグラフの作画域の右端に合わせる。viewBox 幅は実測ピクセルと等しいため、右パディング 6 はそのまま 6px に対応する。 */
+	right: 6px;
+	font-size: 0.72rem;
+	line-height: 1;
+	font-variant-numeric: tabular-nums;
+	pointer-events: none;
+}
+
+.verdict.warn {
+	color: #c0392b;
+}
+
+.verdict.ok {
+	color: #2e7d4f;
+}
+
+.verdict.idle {
+	color: #777777;
+}
+
+/* バーンダウンの差込先。SVG を絶対配置で敷き詰める起点にする。SVG は viewBox 由来の固有アスペクト比を持つため、通常配置のまま height:100% を与えると SVG 自身の固有高さが最小コンテンツ高として効き、描画のたびに直前の高さが下限へ焼き付いて縦が縮まなくなる。SVG をレイアウトの寸法計算から外し、この箱の高さは flex だけで決める。 */
+.chart {
+	flex: 1;
+	min-height: 0;
+	width: 100%;
+	position: relative;
+}
+
+.heatmap {
+	flex: 1;
+	width: 100%;
+}
+
+.heat {
+	height: 100%;
+	display: grid;
+	grid-template-columns: 24px repeat(24, 1fr);
+	/* 時刻ヘッダ行は内容なり、7曜日の行は均等に分けて器の高さを満たす。器が高いほど各行(=セル)が縦へ伸びる。 */
+	grid-template-rows: auto repeat(7, 1fr);
+	row-gap: 2px;
+	column-gap: 2px;
+}
+
+.heat .h-cell {
+	min-height: var(--heat-cell-height);
+	border-radius: 0;
+	background-color: var(--heat-empty);
+}
+
+.heat .h-cell.day-start {
+	border-top-left-radius: var(--heat-radius);
+	border-bottom-left-radius: var(--heat-radius);
+}
+
+.heat .h-cell.day-end {
+	border-top-right-radius: var(--heat-radius);
+	border-bottom-right-radius: var(--heat-radius);
+}
+
+.heat .h-cell.empty {
+	background-color: var(--heat-empty);
+}
+
+.heat .h-cell.zero {
+	/* 枠線だと帯の中で線が増えてうるさくなるため、最暗色を半透明で塗って未消費を控えめに示す。 */
+	background-color: color-mix(in srgb, var(--heat-zero) 20%, transparent);
+}
+
+/* 今この瞬間のセル(今日×現在時刻)。バーンダウンの現在マーカーと同色の枠で「今ここ」を指す。塗りには触れず枠だけ重ねるので、空・未消費・消費ありのどの状態にも乗る。 */
+.heat .h-cell.now {
+	box-shadow: inset 0 0 0 1.5px var(--chart-now);
+}
+
+.heat .h-day {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	min-height: var(--heat-cell-height);
+	line-height: 1;
+	font-size: var(--heat-cell-fontsize);
+	color: var(--chart-sub);
+}
+
+/* 今日の曜日ラベル。淡いアクセント地にアクセント色の太字を載せたタブにして、現在の曜日行をすぐ見つけられるようにする。両テーマで文字と地が同じアクセント系統なので白文字のような破綻が出ない。 */
+.heat .h-day.today {
+	border-radius: var(--heat-radius);
+	background-color: var(--chart-area);
+	color: var(--chart-line);
+	font-weight: 700;
+}
+
+.heat .h-hour {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	min-height: var(--heat-cell-height);
+	line-height: 1;
+	font-size: var(--heat-hour-fontsize);
+	color: var(--chart-faint);
+}
+
+.heat-hint {
+	padding: 8px 0;
+	font-size: 0.8rem;
+	color: var(--chart-faint);
+}
+
+@media (min-width: 820px) {
+	.panels {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		/* 1行だけのグリッドにこの行を 1fr で満たさせ、2枚のパネルを縦いっぱい(=panels の高さ)へ引き伸ばす。これが無いと行が内容なりに畳まれ、2カラム時にチャートが縦へ伸びない。 */
+		grid-template-rows: 1fr;
+	}
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		color: #f6f6f6;
+		/* ダークでも地色は塗らず、システム背景(Mica/Acrylic)を透かす。 */
+		background-color: transparent;
+
+		--chart-grid: rgba(255, 255, 255, 0.08);
+		--chart-faint: #6f6f7a;
+		--chart-sub: #a2a2ac;
+		--chart-line: #4cc2ff;
+		--chart-area: rgba(76, 194, 255, 0.14);
+		--chart-warn: #ff6b6b;
+		--chart-ok: #69d07a;
+		--chart-wall: #5a5a66;
+		--chart-now: #ffffff;
+		--heat-empty: rgba(255, 255, 255, 0.05);
+	}
+
+	/* 暗色ではつまみを明るい半透明にして暗い地に馴染ませる。 */
+	.window-body {
+		scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+	}
+
+	button {
+		color: #ffffff;
+		background-color: rgba(255, 255, 255, 0.06);
+		/* 暗色では上辺を明るく下へ向けて淡くし、上から光が当たる縁にして面の段差を出す。 */
+		border-color: rgba(255, 255, 255, 0.12) rgba(255, 255, 255, 0.08) rgba(255, 255, 255, 0.05);
+	}
+
+	button:hover {
+		background-color: rgba(255, 255, 255, 0.1);
+	}
+
+	button:active {
+		background-color: rgba(255, 255, 255, 0.04);
+		border-color: rgba(255, 255, 255, 0.06);
+		color: rgba(255, 255, 255, 0.6);
+	}
+
+	.titlebar-title {
+		color: #c8c8c8;
+	}
+
+	.tb-btn {
+		color: #e8e8e8;
+	}
+
+	.tb-btn:hover {
+		background-color: rgba(255, 255, 255, 0.08);
+	}
+
+	.tb-close:hover {
+		background-color: #c42b1c;
+		color: #ffffff;
+	}
+
+	.status {
+		color: #a0a0a0;
+	}
+
+	.error-banner {
+		color: #ff6b5e;
+		background-color: rgba(255, 107, 94, 0.1);
+		border-color: rgba(255, 107, 94, 0.3);
+	}
+
+	.meter-track {
+		background-color: #3a3a3a;
+	}
+
+	.panel {
+		border-color: #33333b;
+		background-color: rgba(255, 255, 255, 0.02);
+	}
+
+	.pill.warn {
+		color: #ff9d9d;
+	}
+
+	.pill.ok {
+		color: #9fe3aa;
+	}
+
+	.pill.idle {
+		color: #a0a0a0;
+	}
+
+	.meter-reset {
+		color: #a0a0a0;
+	}
+
+	.chart-card {
+		border-color: #33333b;
+		background-color: rgba(255, 255, 255, 0.02);
+	}
+
+	.verdict.warn {
+		color: #ff9d9d;
+	}
+
+	.verdict.ok {
+		color: #9fe3aa;
+	}
+
+	.verdict.idle {
+		color: #a0a0a0;
+	}
+
+	.card {
+		border-color: #33333b;
+		background-color: #2b2b2b;
+	}
+
+	.row-desc {
+		color: #a0a0a0;
+	}
+
+	.segmented {
+		border-color: rgba(255, 255, 255, 0.14);
+	}
+
+	.segmented button {
+		background-color: #2b2b2b;
+		color: #f6f6f6;
+	}
+
+	.segmented button + button {
+		border-left-color: rgba(255, 255, 255, 0.14);
+	}
+
+	.combo-trigger {
+		background-color: #2b2b2b;
+		color: #f6f6f6;
+		border-color: rgba(255, 255, 255, 0.14);
+	}
+
+	.combo-list {
+		background-color: #2b2b2b;
+		border-color: rgba(255, 255, 255, 0.14);
+		box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+	}
+
+	.combo-swatch {
+		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+	}
+
+	.switch .track {
+		background-color: #555555;
+	}
+}

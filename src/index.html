@@ -1,0 +1,169 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- Copyright (C) 2026 Romly -->
+<html lang="ja">
+	<head>
+		<meta charset="UTF-8" />
+		<link rel="stylesheet" href="styles.css" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title data-i18n="app.name">払底枯渇</title>
+		<script type="module" src="/main.js" defer></script>
+	</head>
+
+	<body>
+		<div class="titlebar">
+			<div class="titlebar-drag" id="titlebar-drag">
+				<canvas id="titlebar-gauge" class="titlebar-gauge" width="0" height="0" aria-hidden="true" hidden></canvas>
+				<span class="titlebar-title" data-i18n="app.name">払底枯渇</span>
+			</div>
+			<div class="titlebar-controls">
+				<button type="button" class="tb-btn" id="tb-min" aria-label="最小化" title="最小化" data-i18n-aria-label="titlebar.minimize" data-i18n-title="titlebar.minimize"><span class="tb-ico" aria-hidden="true">&#xE921;</span></button>
+				<button type="button" class="tb-btn" id="tb-max" aria-label="最大化" title="最大化" data-i18n-aria-label="titlebar.maximize" data-i18n-title="titlebar.maximize"><span class="tb-ico" aria-hidden="true">&#xE922;</span></button>
+				<button type="button" class="tb-btn tb-close" id="tb-close" aria-label="閉じる" title="閉じる" data-i18n-aria-label="titlebar.close" data-i18n-title="titlebar.close"><span class="tb-ico" aria-hidden="true">&#xE8BB;</span></button>
+			</div>
+		</div>
+		<div class="window-body">
+			<main class="app" id="view-main">
+				<header class="app-header">
+					<p id="status" class="status"></p>
+					<button id="refresh" type="button" data-i18n="main.refresh">更新</button>
+					<button id="open-settings" class="icon-btn" type="button" aria-label="設定" title="設定" data-i18n-aria-label="main.settings" data-i18n-title="main.settings">
+						<span class="ico" aria-hidden="true">&#xE008;</span>
+					</button>
+				</header>
+				<p id="error" class="error-banner" hidden></p>
+				<section class="panels">
+					<figure id="panel-session" class="panel">
+						<figcaption class="panel-cap">
+							<span class="panel-name" data-i18n="meter.session.label">セッション (5時間枠)</span>
+							<div id="session-head" class="meter-head"></div>
+						</figcaption>
+						<div id="session-meter" class="panel-meter"></div>
+						<div class="chart-wrap">
+							<span id="session-verdict" class="verdict idle"></span>
+							<div id="session-chart" class="chart" title="ホイールで横ズーム / Ctrl+ホイールで縦ズーム / ドラッグで移動 / ダブルクリックでリセット" data-i18n-title="chart.zoomHint"></div>
+						</div>
+					</figure>
+					<figure id="panel-week" class="panel">
+						<figcaption class="panel-cap">
+							<span class="panel-name" data-i18n="meter.week.label">週間 (全モデル)</span>
+							<div id="week-head" class="meter-head"></div>
+						</figcaption>
+						<div id="week-meter" class="panel-meter"></div>
+						<div class="chart-wrap">
+							<span id="week-verdict" class="verdict idle"></span>
+							<div id="week-chart" class="chart" title="ホイールで横ズーム / Ctrl+ホイールで縦ズーム / ドラッグで移動 / ダブルクリックでリセット" data-i18n-title="chart.zoomHint"></div>
+						</div>
+					</figure>
+				</section>
+				<section class="charts" id="trend-section">
+					<figure class="chart-card">
+						<figcaption class="chart-cap">
+							<span class="chart-name" data-i18n="heat.title">消費傾向 (曜日 × 時間帯)</span>
+						</figcaption>
+						<div id="heatmap" class="heatmap"></div>
+					</figure>
+				</section>
+			</main>
+			<main class="settings-view" id="view-settings" hidden>
+				<button id="settings-back" class="back-btn" type="button">
+					<span aria-hidden="true">←</span>
+					<span data-i18n="settings.back">戻る</span>
+				</button>
+				<div class="settings-body">
+					<h1 class="settings-title" data-i18n="settings.title">設定</h1>
+					<div class="card">
+						<div class="row">
+							<div class="row-text">
+								<div class="row-title" data-i18n="settings.theme.title">テーマ</div>
+								<div class="row-desc" data-i18n="settings.theme.desc">アプリの配色。システム設定に従うか、ライト・ダークを選びます。</div>
+							</div>
+							<div class="row-control">
+								<div class="segmented" id="theme-seg" role="group">
+									<button type="button" data-value="system" data-i18n="settings.theme.system">システム</button>
+									<button type="button" data-value="light" data-i18n="settings.theme.light">ライト</button>
+									<button type="button" data-value="dark" data-i18n="settings.theme.dark">ダーク</button>
+								</div>
+							</div>
+						</div>
+					</div>
+					<div class="card">
+						<div class="row">
+							<div class="row-text">
+								<div class="row-title" data-i18n="settings.language.title">表示言語</div>
+								<div class="row-desc" data-i18n="settings.language.desc">メニューと設定画面の表示言語。</div>
+							</div>
+							<div class="row-control">
+								<div class="segmented" id="lang-seg" role="group">
+									<button type="button" data-value="system" data-i18n="settings.language.system">システムに合わせる</button>
+									<button type="button" data-value="ja" data-i18n="settings.language.ja">日本語</button>
+									<button type="button" data-value="en" data-i18n="settings.language.en">English</button>
+								</div>
+							</div>
+						</div>
+					</div>
+					<div class="card">
+						<div class="row">
+							<div class="row-text">
+								<div class="row-title" data-i18n="settings.trend.title">消費傾向の表示</div>
+								<div class="row-desc" data-i18n="settings.trend.desc">曜日と時間帯ごとの消費ヒートマップを表示します。</div>
+							</div>
+							<div class="row-control">
+								<label class="switch">
+									<input type="checkbox" id="trend-toggle" />
+									<span class="track"></span>
+								</label>
+							</div>
+						</div>
+					</div>
+					<div class="card">
+						<div class="row">
+							<div class="row-text">
+								<div class="row-title" data-i18n="settings.heat.title">消費傾向の配色</div>
+								<div class="row-desc" data-i18n="settings.heat.desc">曜日×時間帯ヒートマップのカラーパレット。グレイスケールはテーマに合わせて濃淡が反転します。</div>
+							</div>
+							<div class="row-control">
+								<div class="combo" id="heat-combo">
+									<button type="button" class="combo-trigger" id="heat-combo-trigger" aria-haspopup="listbox" aria-expanded="false">
+										<span class="combo-name" id="heat-combo-name"></span>
+										<span class="combo-swatch" id="heat-combo-swatch" aria-hidden="true"></span>
+										<span class="combo-caret" aria-hidden="true"></span>
+									</button>
+									<ul class="combo-list" id="heat-combo-list" role="listbox" tabindex="-1" hidden></ul>
+								</div>
+							</div>
+						</div>
+					</div>
+					<div class="card">
+						<div class="row">
+							<div class="row-text">
+								<div class="row-title" data-i18n="settings.dateformat.title">日付の表示形式</div>
+								<div class="row-desc" data-i18n="settings.dateformat.desc">リセット時刻などの日付の書き方。海外式 (Jun 27, 2:40pm) か 日本式 (6/27 14:40)。</div>
+							</div>
+							<div class="row-control">
+								<div class="segmented" id="datefmt-seg" role="group">
+									<button type="button" data-value="intl" data-i18n="settings.dateformat.intl">海外式</button>
+									<button type="button" data-value="jp" data-i18n="settings.dateformat.jp">日本式</button>
+								</div>
+							</div>
+						</div>
+					</div>
+					<div class="card">
+						<div class="row">
+							<div class="row-text">
+								<div class="row-title" data-i18n="settings.autostart.title">ログイン時に起動</div>
+								<div class="row-desc" data-i18n="settings.autostart.desc">Windows へのログイン時にこのアプリを自動で起動し、トレイに常駐します。</div>
+							</div>
+							<div class="row-control">
+								<label class="switch">
+									<input type="checkbox" id="autostart-toggle" />
+									<span class="track"></span>
+								</label>
+							</div>
+						</div>
+					</div>
+				</div>
+			</main>
+		</div>
+	</body>
+</html>
