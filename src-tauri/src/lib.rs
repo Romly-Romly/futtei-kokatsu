@@ -162,11 +162,21 @@ fn resolve_claude_bin() -> PathBuf {
 // claude を直接起動して /usage の JSON を取得し、結果テキストを返す。標準入力は空のまま閉じることで非対話起動時の待ち時間を避ける。
 fn fetch_usage_text() -> Result<String, String> {
 	let bin = resolve_claude_bin();
-	let output = Command::new(&bin)
-		.args(["-p", "/usage", "--output-format", "json"])
+	let mut cmd = Command::new(&bin);
+	cmd.args(["-p", "/usage", "--output-format", "json"])
 		.stdin(Stdio::null())
 		.stdout(Stdio::piped())
-		.stderr(Stdio::piped())
+		.stderr(Stdio::piped());
+
+	// 起動する claude はコンソールアプリのため、GUI プロセスから直接起動すると既定では起動のたびにコンソール窓が開く。Windows では CREATE_NO_WINDOW を付けてこれを抑止する。
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+		cmd.creation_flags(CREATE_NO_WINDOW);
+	}
+
+	let output = cmd
 		.output()
 		.map_err(|e| format!("claude の起動に失敗しました ({}): {}", bin.display(), e))?;
 
