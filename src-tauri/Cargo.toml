@@ -1,6 +1,6 @@
 [package]
 name = "futtei-kokatsu"
-version = "1.0.2"
+version = "1.1.0"
 description = "Claude の利用量（週次・セッションの消費率）を見張る常駐ツール"
 authors = ["Romly"]
 license = "GPL-3.0-only"
@@ -19,11 +19,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [ "tray-icon"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
 tiny-skia = "0.11"
+# トレイのバーンダウン描画で、claude が返すリセット時刻の壁時計表記(現地時間)を絶対時刻へ解釈するために使う。壁時計の年月日時分から現地タイムゾーンでの Unix 時刻を得るには現地オフセットの解決が要り、これを clock フィーチャの Local が担う。
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # トレイの小アイコン寸法を現在の DPI から測り、Mica を使える Windows 11 かをビルド番号で見分け、OS のアクセント色をレジストリから読むために Win32 を直接呼ぶ。tray-icon が使う版に合わせて windows-sys のバージョン重複を避ける。
 [target.'cfg(windows)'.dependencies]

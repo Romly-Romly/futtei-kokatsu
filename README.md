@@ -23,7 +23,13 @@ The app is not code-signed, so Windows SmartScreen will warn you on first launch
 
 ### macOS
 
-Planned.
+- **Disk image** — `Futtei-Kokatsu_*.dmg` (Apple Silicon only)
+
+Open the downloaded `.dmg` and drag `Futtei-Kokatsu.app` into your Applications folder. Since it isn't signed, macOS won't let you open it — it just tells you to *move it to the Trash* (rude! 😭). Run the following command in Terminal to strip the quarantine attribute, and it will launch. Use at your own risk.
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Futtei-Kokatsu.app
+```
 
 
 
@@ -32,6 +38,7 @@ Planned.
 | OS | Version |
 |---|---|
 | Windows | 10 / 11 (64-bit) |
+| macOS | 11 (Big Sur) or later (Apple Silicon) |
 
 **Claude Code is required.** This app reads your usage by invoking the `claude` command-line tool, so you must have [Claude Code](https://www.claude.com/product/claude-code) installed and signed in to a Claude subscription.
 

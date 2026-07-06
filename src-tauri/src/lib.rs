@@ -22,6 +22,9 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, Theme};
 // 利用枠を取得する間隔。窓の開閉と無関係に常駐スレッドがこの周期で測り続ける。
 const POLL_INTERVAL: Duration = Duration::from_secs(600);
 
+// フォーカスを失ってから自動でトレイへ畳むまでの猶予。枠なしウィンドウの縁を掴んでリサイズを始めると、窓は前面のままなのに一過性のフォーカス喪失イベントが飛ぶ。これを真に受けて即座に畳むとリサイズできないため、この間だけ待って本当に前面を失ったままかを確かめてから畳む。
+const BLUR_HIDE_GRACE: Duration = Duration::from_millis(150);
+
 // トレイアイコンを生成後に取り出して操作するための固定 id。ツールチップ更新コマンドが tray_by_id で参照する。
 const TRAY_ID: &str = "main-tray";
 
@@ -66,7 +69,7 @@ struct Sample {
 }
 
 
-// 設定ウィンドウで操作する永続設定。theme と language は将来の全面ローカライズも見据えて文字列で持つ。show_trend は消費傾向ヒートマップの表示有無、date_format は日付の表示形式、heat_palette は消費傾向ヒートマップの配色(standard/parula/turbo/gray)。serde(default) を付け、項目が増えても古い設定ファイルが読めるようにする。
+// 設定ウィンドウで操作する永続設定。theme と language は将来の全面ローカライズも見据えて文字列で持つ。show_trend は消費傾向ヒートマップの表示有無、date_format は日付の表示形式、heat_palette は消費傾向ヒートマップの配色(standard/parula/turbo/gray)。tray_style はトレイ(メニューバー)アイコンの図柄で "burndown-session"(セッション枠の簡易バーンダウン)・"burndown-week"(週次枠の簡易バーンダウン)・"gauge"(リング＋扇形のゲージ)のいずれか。hide_on_blur はウィンドウがフォーカスを失った時に自動でトレイへ隠すか。serde(default) を付け、項目が増えても古い設定ファイルが読めるようにする。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
@@ -75,6 +78,8 @@ struct Settings {
 	show_trend: bool,
 	date_format: String,
 	heat_palette: String,
+	tray_style: String,
+	hide_on_blur: bool,
 }
 
 impl Default for Settings {
@@ -85,6 +90,8 @@ impl Default for Settings {
 			show_trend: true,
 			date_format: "intl".to_string(),
 			heat_palette: "standard".to_string(),
+			tray_style: "burndown-session".to_string(),
+			hide_on_blur: false,
 		}
 	}
 }
@@ -577,6 +584,9 @@ static LAST_WINDOW_STATE: LazyLock<Mutex<Option<WindowState>>> = LazyLock::new(|
 // カスタムタイトルバーの最大化ボタンの図形を最大化状態へ追従させるため、最後にフロントへ通知した最大化状態を覚えておく。Resized のたびに比較し、変化したときだけ通知して無駄打ちを避ける。
 static LAST_MAXIMIZED: AtomicBool = AtomicBool::new(false);
 
+// フォーカスを失った時に自動でトレイへ隠す設定の現在値。フォーカス変化イベントのたびに設定ファイルを読み直さずに済むよう、起動時と設定保存時にここへ写し取り、ウィンドウイベントハンドラからはこの値を見る。
+static HIDE_ON_BLUR: AtomicBool = AtomicBool::new(false);
+
 // 復元時に「ウィンドウを掴める」と見なす最小の可視領域(物理ピクセル)。どのモニターともこれ未満しか重ならない位置は画面外とみなしてモニター内へ収め直す。タイトルバーをドラッグできる程度の幅と高さを確保する値にする。
 const MIN_VISIBLE_W: i32 = 120;
 const MIN_VISIBLE_H: i32 = 60;
@@ -947,11 +957,16 @@ fn get_settings(app: tauri::AppHandle) -> Settings {
 
 
 
-// フロントエンドから受け取った設定を保存し、テーマを即座にウィンドウへ反映するコマンド。
+// フロントエンドから受け取った設定を保存し、テーマとトレイアイコンを即座に反映するコマンド。トレイの図柄(バーンダウン/ゲージ)や対象枠の切替を、新たな取得を待たずに直近の値で描き直す。
 #[tauri::command]
 fn set_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), String> {
 	write_settings(&app, &settings)?;
 	apply_theme(&app, &settings);
+	// フォーカス喪失時に隠す設定はウィンドウイベントハンドラが参照するため、保存のたびにランタイムのフラグへ写す。
+	HIDE_ON_BLUR.store(settings.hide_on_blur, Ordering::Relaxed);
+	if let Some(usage) = latest_usage(&app) {
+		update_tray_icon(&app, &usage);
+	}
 	Ok(())
 }
 
@@ -1168,6 +1183,25 @@ fn win_close(app: tauri::AppHandle) {
 	if let Some(window) = app.get_webview_window("main") {
 		let _ = window.close();
 	}
+}
+
+
+
+
+// 右クリックメニューの「終了」から呼ぶ。トレイの終了と同じく、CloseRequested を経ずにプロセスを終えるため、ここで現在のウィンドウ配置を保存してから抜ける。保存しないと最後の移動・リサイズが次回起動へ残らない。
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+	save_window_state(&app);
+	app.exit(0);
+}
+
+
+
+
+// タイトルバーへ表示するアプリのバージョンを返すコマンド。文字列は tauri.conf.json 由来の PackageInfo から引くため、バージョンを変えてもここは追従する。トレイメニューの見出しと同じ出所にすることで、表示が二重管理にならないようにする。
+#[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+	app.package_info().version.to_string()
 }
 
 
@@ -1426,6 +1460,338 @@ fn render_gauge_rgba(size: u32, session: Option<f32>, week: Option<f32>) -> Vec<
 
 
 
+// トレイのバーンダウンが表す利用枠の窓長(ミリ秒)。セッションは5時間枠、週間は週次(全モデル)枠。窓の起点(リセット時刻から遡った時刻)の算出に使う。
+const SESSION_WINDOW_MS: i64 = 5 * 3600 * 1000;
+const WEEK_WINDOW_MS: i64 = 7 * 24 * 3600 * 1000;
+
+// 直近ペースを見る窓(経過率)。この区間の区間傾きの中央値を直近の消費ペースとみなす。
+const BURNDOWN_RECENT_FRAC: f32 = 0.25;
+// 投影率の下限割合。直近ペースが落ちても累積平均ペースのこの割合は下回らせない。短い休止で投影が水平化するのを防ぐ。
+const BURNDOWN_FLOOR_FRAC: f32 = 0.5;
+// 投影を出すのに要る最小のデータ隔たり(経過率)。実測点の張る範囲がこれ未満の序盤は投影を控え、過大な早期枯渇判定を避ける。
+const BURNDOWN_MIN_SPAN: f32 = 0.08;
+
+// トレイのバーンダウンの固定色([R, G, B, A])。塗り面・実測線・投影線はペース色(gauge と共通の ICON_GAUGE_LOW/MID/HIGH)で塗るため、ここには理想線と現在ドットの色だけを持つ。
+// 窓の始点(0%)からリセット(100%)を結ぶ理想の対角線。淡い基準線にする。
+const BURN_IDEAL_COLOR: [u8; 4] = [150, 150, 150, 150];
+// 実測線の先端に置く現在位置ドット。明るい印にする。
+const BURN_NOW_COLOR: [u8; 4] = [240, 244, 252, 255];
+
+
+
+// tiny-skia の乗算済みアルファ画素を、トレイやウィンドウのアイコンが前提とするストレートアルファへ戻し、R,G,B,A の順の RGBA バイト列にして返す。
+fn demultiply_rgba(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
+	let mut rgba = Vec::with_capacity((pixmap.width() * pixmap.height() * 4) as usize);
+	for px in pixmap.pixels() {
+		let c = px.demultiply();
+		rgba.push(c.red());
+		rgba.push(c.green());
+		rgba.push(c.blue());
+		rgba.push(c.alpha());
+	}
+	rgba
+}
+
+
+
+// 角を半径 r で丸めた矩形のパスを作る。トレイのバーンダウンの下地に使う。四隅は制御点を角へ置く2次ベジェで丸める。
+fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
+	let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+	let mut pb = tiny_skia::PathBuilder::new();
+	pb.move_to(x + r, y);
+	pb.line_to(x + w - r, y);
+	pb.quad_to(x + w, y, x + w, y + r);
+	pb.line_to(x + w, y + h - r);
+	pb.quad_to(x + w, y + h, x + w - r, y + h);
+	pb.line_to(x + r, y + h);
+	pb.quad_to(x, y + h, x, y + h - r);
+	pb.line_to(x, y + r);
+	pb.quad_to(x, y, x + r, y);
+	pb.close();
+	pb.finish()
+}
+
+
+
+// リセット時刻文字列から壁時計成分を取り出す正規表現。日と時刻の区切りはカンマと " at " の双方を受け、分は省略されうる。タイムゾーン表記は表示ローカルと同じとみなして照合対象にしない。
+static RE_RESET: LazyLock<Regex> = LazyLock::new(|| {
+	Regex::new(r"(?i)([A-Za-z]{3})\s+(\d{1,2})(?:,|\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)").unwrap()
+});
+
+
+
+// 3文字の英語月名を1起点の月番号(1〜12)へ変換する。先頭を大文字・続く2字を小文字へ正規化してから引く。
+fn month_index(name: &str) -> Option<u32> {
+	const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+	let mut norm = String::with_capacity(3);
+	for (i, c) in name.chars().take(3).enumerate() {
+		if i == 0 {
+			norm.extend(c.to_uppercase());
+		} else {
+			norm.extend(c.to_lowercase());
+		}
+	}
+	MONTHS.iter().position(|m| *m == norm).map(|i| i as u32 + 1)
+}
+
+
+
+// リセット時刻文字列から (月(1〜12), 日, 時(0〜23), 分) の壁時計成分を取り出す。"Jun 23, 4:10am ..." や "Jul 2 at 5:29am ..." の双方に対応し、分は省略されうる。範囲外の値は None として弾く。
+fn parse_reset_components(reset: &str) -> Option<(u32, u32, u32, u32)> {
+	let caps = RE_RESET.captures(reset)?;
+	let month = month_index(caps.get(1)?.as_str())?;
+	let day: u32 = caps.get(2)?.as_str().parse().ok()?;
+	let mut hour: u32 = caps.get(3)?.as_str().parse().ok()?;
+	let min: u32 = match caps.get(4) {
+		Some(m) => m.as_str().parse().ok()?,
+		None => 0,
+	};
+	let ap = caps.get(5)?.as_str().to_ascii_lowercase();
+	if ap == "pm" && hour != 12 {
+		hour += 12;
+	}
+	if ap == "am" && hour == 12 {
+		hour = 0;
+	}
+	if day == 0 || day > 31 || hour > 23 || min > 59 {
+		return None;
+	}
+	Some((month, day, hour, min))
+}
+
+
+
+// リセット時刻文字列を Unix ミリ秒へ解釈する。壁時計成分を現在の年の現地時間として組み立て、24時間以上過去へ落ちる場合は年境界とみなして翌年で組み直す。now_ms は現在時刻(Unixミリ秒)で、年の決定と過去判定の基準に使う。壁時計から現地の絶対時刻を得るには現地タイムゾーンの解決が要るため chrono の Local を通す。
+fn parse_reset_ms(reset: &str, now_ms: i64) -> Option<i64> {
+	use chrono::{Datelike, Local, TimeZone};
+
+	let (month, day, hour, min) = parse_reset_components(reset)?;
+	let now = Local.timestamp_millis_opt(now_ms).single()?;
+	let build = |year: i32| -> Option<i64> {
+		Local
+			.with_ymd_and_hms(year, month, day, hour, min, 0)
+			.earliest()
+			.map(|dt| dt.timestamp_millis())
+	};
+	let when = build(now.year())?;
+	if when < now_ms - 24 * 3600 * 1000 {
+		return build(now.year() + 1);
+	}
+	Some(when)
+}
+
+
+
+// 線形投影の結果。end は投影線の終点(経過率, 使用%)で、枠を割る見込みならその手前(100%到達点)、割らなければリセット時点まで。枠を割らない場合の end の使用%が、リセット時点の投影使用%になる。hit_t は100%到達の経過率で、到達しないなら None。warn は到達がリセット前(hit_t<1)であること。
+struct Projection {
+	end: (f32, f32),
+	hit_t: Option<f32>,
+	warn: bool,
+}
+
+
+
+// 昇順済み配列の中央値を返す。要素数が偶数のときは中央2点の平均を取る。空なら None。
+fn median(sorted: &[f32]) -> Option<f32> {
+	if sorted.is_empty() {
+		return None;
+	}
+	let m = sorted.len() / 2;
+	if sorted.len() % 2 == 1 {
+		Some(sorted[m])
+	} else {
+		Some((sorted[m - 1] + sorted[m]) / 2.0)
+	}
+}
+
+
+
+// 実測点列(経過率, 使用%)から、現在地(f, used)以降の消費を線形に前方投影する。簡易版として、直近 BURNDOWN_RECENT_FRAC ぶんの区間傾きの中央値を消費率とし、累積平均ペースの一定割合で下支えする(短い休止で投影が寝るのを防ぐ)。実測点の張る範囲が狭い序盤は過大判定を避けるため投影を控えて None を返す。
+fn project_linear(samples: &[(f32, f32)], f: f32, used: f32) -> Option<Projection> {
+	if samples.len() < 2 || f <= 0.0 || f >= 1.0 {
+		return None;
+	}
+	let first_t = samples.first()?.0;
+	let last_t = samples.last()?.0;
+	if last_t - first_t < BURNDOWN_MIN_SPAN {
+		return None;
+	}
+
+	let r_avg = used / f;
+	// 直近区間の傾きを集め、中央値を直近ペースとする。端点差分でなく分布の中央値にすることで、一時的な平坦区間に率が引きずられないようにする。
+	let cutoff = f - BURNDOWN_RECENT_FRAC;
+	let mut slopes: Vec<f32> = Vec::new();
+	for pair in samples.windows(2) {
+		let (t0, v0) = pair[0];
+		let (t1, v1) = pair[1];
+		if t1 < cutoff {
+			continue;
+		}
+		let dt = t1 - t0;
+		if dt > 0.0 {
+			slopes.push((v1 - v0) / dt);
+		}
+	}
+	slopes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+	let rate = match median(&slopes) {
+		Some(r) => r.max(BURNDOWN_FLOOR_FRAC * r_avg),
+		None => r_avg,
+	}
+	.max(0.0);
+
+	// used が100以上なら既に使い切りなので枯渇は現在地。それ未満は残容量を率で割って到達を見積もる。率が0なら到達しない。
+	let hit_t = if used >= 100.0 {
+		Some(f)
+	} else if rate > 0.0 {
+		Some(f + (100.0 - used) / rate)
+	} else {
+		None
+	};
+	let end_t = hit_t.map(|h| h.min(1.0)).unwrap_or(1.0);
+	let end_v = used + rate * (end_t - f);
+	let warn = hit_t.map(|h| h < 1.0).unwrap_or(false);
+	Some(Projection { end: (end_t, end_v), hit_t, warn })
+}
+
+
+
+// 指定の幅・高さ(px)で、対象枠の簡易バーンダウンを Pixmap へ描く。理想の対角線・使用%の塗り面と実測線・線形投影・現在位置ドットを重ね、リセット前に枯渇する見込みなら枯渇点も打つ。塗り面と線と投影はペース(理想より先行か・枠を割りそうか)で ICON_GAUGE_LOW/MID/HIGH に色づける。samples は窓内の実測点を (経過率0〜1, 使用%0〜100) で古い順に並べ、末尾を現在地とする。空のときは背景と理想線だけを描く。
+fn draw_burndown_pixmap(width: u32, height: u32, samples: &[(f32, f32)], proj: Option<&Projection>) -> tiny_skia::Pixmap {
+	let w = width as f32;
+	let h = height as f32;
+	let mut pixmap = tiny_skia::Pixmap::new(width, height).expect("バーンダウン用 Pixmap の確保に失敗しました");
+
+	// 作画域。線やドットが端で欠けない程度の余白を上下左右に取る。
+	let pad = (h * 0.16).max(1.5);
+	let plot_l = pad;
+	let plot_t = pad;
+	let plot_w = (w - pad * 2.0).max(1.0);
+	let plot_h = (h - pad * 2.0).max(1.0);
+	let x = |t: f32| plot_l + t.clamp(0.0, 1.0) * plot_w;
+	let y = |v: f32| plot_t + (1.0 - v.clamp(0.0, 100.0) / 100.0) * plot_h;
+
+	// タスクバー/メニューバーの地色から切り離すための下地。角を丸めた矩形で全体を覆う。
+	let radius = (h.min(w) * 0.2).max(0.0);
+	if let Some(backdrop) = rounded_rect_path(0.5, 0.5, w - 1.0, h - 1.0, radius) {
+		let mut paint = tiny_skia::Paint::default();
+		paint.anti_alias = true;
+		paint.set_color(icon_color(ICON_BACKDROP_COLOR));
+		pixmap.fill_path(&backdrop, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+	}
+
+	// 理想の対角線(0%→100%)。淡い基準線として先に敷く。
+	let mut ib = tiny_skia::PathBuilder::new();
+	ib.move_to(x(0.0), y(0.0));
+	ib.line_to(x(1.0), y(100.0));
+	if let Some(path) = ib.finish() {
+		let mut paint = tiny_skia::Paint::default();
+		paint.anti_alias = true;
+		paint.set_color(icon_color(BURN_IDEAL_COLOR));
+		let stroke = tiny_skia::Stroke { width: (h * 0.03).max(0.8), ..Default::default() };
+		pixmap.stroke_path(&path, &paint, &stroke, tiny_skia::Transform::identity(), None);
+	}
+
+	// 実測点が無ければ背景と理想線だけで返す。
+	let (f, used) = match samples.last() {
+		Some(p) => *p,
+		None => return pixmap,
+	};
+
+	// ペース色。既に使い切り・リセット前に枯渇見込みなら HIGH、理想より先行なら MID、余裕があれば LOW。
+	let warn = proj.map(|p| p.warn).unwrap_or(false);
+	let pace = if used >= 100.0 || warn {
+		ICON_GAUGE_HIGH
+	} else if used > 100.0 * f {
+		ICON_GAUGE_MID
+	} else {
+		ICON_GAUGE_LOW
+	};
+	let line_w = (h * 0.05).max(1.0);
+
+	// 使用%の塗り面と実測線。面は実測線の下(使用0%まで)をペース色の淡い塗りで埋める。
+	if samples.len() >= 2 {
+		let mut area = tiny_skia::PathBuilder::new();
+		area.move_to(x(samples[0].0), y(0.0));
+		for &(t, v) in samples {
+			area.line_to(x(t), y(v));
+		}
+		area.line_to(x(f), y(0.0));
+		area.close();
+		if let Some(path) = area.finish() {
+			let mut paint = tiny_skia::Paint::default();
+			paint.anti_alias = true;
+			paint.set_color(tiny_skia::Color::from_rgba8(pace[0], pace[1], pace[2], 70));
+			pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+		}
+
+		let mut ln = tiny_skia::PathBuilder::new();
+		for (i, &(t, v)) in samples.iter().enumerate() {
+			if i == 0 {
+				ln.move_to(x(t), y(v));
+			} else {
+				ln.line_to(x(t), y(v));
+			}
+		}
+		if let Some(path) = ln.finish() {
+			let mut paint = tiny_skia::Paint::default();
+			paint.anti_alias = true;
+			paint.set_color(icon_color(pace));
+			let stroke = tiny_skia::Stroke { width: line_w, line_cap: tiny_skia::LineCap::Round, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
+			pixmap.stroke_path(&path, &paint, &stroke, tiny_skia::Transform::identity(), None);
+		}
+	}
+
+	// 線形投影。現在地から終点(枠を割るならその手前まで)をペース色の細線で伸ばす。実測線と見分けるため少し細く、わずかに透かす。
+	if let Some(p) = proj {
+		let mut pb = tiny_skia::PathBuilder::new();
+		pb.move_to(x(f), y(used));
+		pb.line_to(x(p.end.0), y(p.end.1));
+		if let Some(path) = pb.finish() {
+			let mut paint = tiny_skia::Paint::default();
+			paint.anti_alias = true;
+			paint.set_color(tiny_skia::Color::from_rgba8(pace[0], pace[1], pace[2], 210));
+			let stroke = tiny_skia::Stroke { width: (line_w * 0.8).max(0.8), line_cap: tiny_skia::LineCap::Round, ..Default::default() };
+			pixmap.stroke_path(&path, &paint, &stroke, tiny_skia::Transform::identity(), None);
+		}
+		// リセット前に枯渇する見込みなら、100%到達点を警戒色で打つ。現在地より先で、かつ枠内のときだけ。
+		if p.warn {
+			if let Some(hit) = p.hit_t {
+				if hit > f && hit <= 1.0 {
+					let mut cb = tiny_skia::PathBuilder::new();
+					cb.push_circle(x(hit), y(100.0), (h * 0.09).max(1.5));
+					if let Some(path) = cb.finish() {
+						let mut paint = tiny_skia::Paint::default();
+						paint.anti_alias = true;
+						paint.set_color(icon_color(ICON_GAUGE_HIGH));
+						pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+					}
+				}
+			}
+		}
+	}
+
+	// 現在位置ドット。実測線の先端(現在地)へ明るい印を置く。
+	let mut nb = tiny_skia::PathBuilder::new();
+	nb.push_circle(x(f), y(used), (h * 0.09).max(1.5));
+	if let Some(path) = nb.finish() {
+		let mut paint = tiny_skia::Paint::default();
+		paint.anti_alias = true;
+		paint.set_color(icon_color(BURN_NOW_COLOR));
+		pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+	}
+
+	pixmap
+}
+
+
+
+// 対象枠の簡易バーンダウンを描き、トレイが前提とするストレートアルファの RGBA バイト列にして返す。draw_burndown_pixmap の描いた乗算済みアルファをストレートアルファへ戻す。
+fn render_burndown_rgba(width: u32, height: u32, samples: &[(f32, f32)], proj: Option<&Projection>) -> Vec<u8> {
+	demultiply_rgba(&draw_burndown_pixmap(width, height, samples, proj))
+}
+
+
+
 
 
 
@@ -1548,8 +1914,111 @@ fn window_icon_px() -> u32 {
 
 
 
-// 取得した利用枠から、外周リング(週間)と中央の円(5時間枠)を重ねたトレイアイコンを描き、現在の DPI に合う寸法で差し替える。窓を隠していてもトレイは生きているため、隠したままでも最新の消費率をアイコンへ反映できる。どちらの枠も取得できないときは既定アイコンのままにする。
+// 直近に取得した session と week(全モデル)のメーター。設定変更など、新たな取得を伴わずにトレイアイコンを描き直すときの現在値の供給元にする。取得のたびに update_tray_icon が更新する。
+static LAST_METERS: LazyLock<Mutex<(Option<Meter>, Option<Meter>)>> = LazyLock::new(|| Mutex::new((None, None)));
+
+
+
+// 新たな取得を伴わずにトレイを描き直すための現在値を返す。直近取得のメーターを優先し、無ければ履歴の最新サンプルへ退く。どちらも得られなければ None。
+fn latest_usage(app: &tauri::AppHandle) -> Option<Usage> {
+	let (session, week_all) = LAST_METERS.lock().unwrap().clone();
+	if session.is_some() || week_all.is_some() {
+		return Some(Usage { session, week_all, week_sonnet: None, raw: String::new() });
+	}
+	let history = read_history(app).ok()?;
+	let last = history.iter().rev().find(|s| s.session.is_some() || s.week_all.is_some() || s.week_sonnet.is_some())?;
+	Some(Usage {
+		session: last.session.clone(),
+		week_all: last.week_all.clone(),
+		week_sonnet: last.week_sonnet.clone(),
+		raw: String::new(),
+	})
+}
+
+
+
+// トレイのバーンダウンアイコンの (幅, 高さ) を px で求める。Windows はトレイが正方形のため一辺を tray_icon_px に揃える。macOS などメニューバーの横幅が可変の環境では、高さをトレイ寸法に合わせつつ横へ広げ、時間軸を読み取りやすくする。
+fn tray_burndown_px() -> (u32, u32) {
+	let h = tray_icon_px();
+	#[cfg(windows)]
+	{
+		(h, h)
+	}
+	#[cfg(not(windows))]
+	{
+		(((h as f32) * 1.8).round() as u32, h)
+	}
+}
+
+
+
+// 設定の対象枠(session/week)について、履歴と現在値から簡易バーンダウンを描いて (RGBA, 幅, 高さ) を返す。現在値・リセット時刻・窓の起点が揃わず描けないときは None を返し、呼び出し側でゲージへ退かせる。
+fn try_render_tray_burndown(app: &tauri::AppHandle, usage: &Usage, target: &str) -> Option<(Vec<u8>, u32, u32)> {
+	let is_week = target == "week";
+	let window_ms = if is_week { WEEK_WINDOW_MS } else { SESSION_WINDOW_MS };
+	let cur = if is_week { usage.week_all.as_ref() } else { usage.session.as_ref() };
+	let used = cur.map(|m| m.used_pct as f32)?;
+
+	let history = read_history(app).unwrap_or_default();
+	// リセット時刻文字列。現在値のものを優先し、無ければ履歴の新しい方から探す。
+	let reset_str = cur.and_then(|m| m.resets.clone()).or_else(|| {
+		history.iter().rev().find_map(|s| {
+			let m = if is_week { s.week_all.as_ref() } else { s.session.as_ref() };
+			m.and_then(|x| x.resets.clone())
+		})
+	})?;
+
+	let now = now_ms() as i64;
+	let reset_ms = parse_reset_ms(&reset_str, now)?;
+	let start_ms = reset_ms - window_ms;
+	let span = window_ms as f32;
+
+	// 窓内の実測点を (経過率, 使用%) へ移す。履歴は時刻順のため経過率も昇順に並ぶ。
+	let mut samples: Vec<(f32, f32)> = history
+		.iter()
+		.filter_map(|s| {
+			let m = if is_week { s.week_all.as_ref() } else { s.session.as_ref() }?;
+			let ts = s.ts as i64;
+			if ts < start_ms || ts > reset_ms {
+				return None;
+			}
+			Some(((ts - start_ms) as f32 / span, m.used_pct as f32))
+		})
+		.collect();
+
+	// 現在値を最新点として末尾へ足し、履歴が古くても現在地を映す。経過率は窓内へ収める。
+	let f_now = ((now - start_ms) as f32 / span).clamp(0.0, 1.0);
+	samples.push((f_now, used));
+
+	let proj = project_linear(&samples, f_now, used);
+	let (w, h) = tray_burndown_px();
+	Some((render_burndown_rgba(w, h, &samples, proj.as_ref()), w, h))
+}
+
+
+
+// 取得した利用枠をトレイアイコンへ反映する。設定 tray_style が "burndown-session"/"burndown-week" なら対象枠の簡易バーンダウンを、"gauge"(または描けないとき)なら外周リング(週間)＋中央の円(5時間枠)のゲージを、現在の DPI に合う寸法で描いて差し替える。窓を隠していてもトレイは生きているため、隠したままでも最新の消費率をアイコンへ反映できる。値が揃わないときは既定アイコンのままにする。
 fn update_tray_icon(app: &tauri::AppHandle, usage: &Usage) {
+	// 設定変更時の描き直しに使えるよう、現在値を控えておく。
+	*LAST_METERS.lock().unwrap() = (usage.session.clone(), usage.week_all.clone());
+
+	let settings = read_settings(app);
+	// バーンダウン指定なら対象枠を取り出す。ゲージ指定や未知の値は None にしてゲージへ回す。
+	let target = match settings.tray_style.as_str() {
+		"burndown-session" => Some("session"),
+		"burndown-week" => Some("week"),
+		_ => None,
+	};
+	if let Some(target) = target {
+		if let Some((rgba, w, h)) = try_render_tray_burndown(app, usage, target) {
+			if let Some(tray) = app.tray_by_id(TRAY_ID) {
+				let _ = tray.set_icon(Some(Image::new_owned(rgba, w, h)));
+			}
+			return;
+		}
+	}
+
+	// ゲージ。バーンダウンを描けないときの退避も兼ねる。どちらの枠も無ければ既定アイコンのまま。
 	let session = usage.session.as_ref().map(|m| m.used_pct as f32);
 	let week = usage.week_all.as_ref().map(|m| m.used_pct as f32);
 	if session.is_none() && week.is_none() {
@@ -1744,6 +2213,8 @@ pub fn run() {
 			// 保存済みのテーマ設定を起動直後のウィンドウへ適用し、初期表示から選択中の配色にする。
 			let settings = read_settings(app.handle());
 			apply_theme(app.handle(), &settings);
+			// フォーカス喪失時に隠す設定を、ウィンドウイベントハンドラが参照するランタイムのフラグへ写す。
+			HIDE_ON_BLUR.store(settings.hide_on_blur, Ordering::Relaxed);
 			// 半透明のシステム背景(Mica 等)を当てて地をネイティブにする。Mica はウィンドウのテーマに追従するため、テーマ適用の後に当てて初期の明暗を揃える。
 			apply_backdrop(app.handle());
 			// 前回のウィンドウ位置・サイズを、現在のモニター構成へ合わせて補正してから復元する。表示の前に整えることで、初期表示で位置やサイズが飛ぶのを避ける。
@@ -1771,9 +2242,27 @@ pub fn run() {
 				save_window_state(window.app_handle());
 				let _ = window.hide();
 			}
+			// フォーカスを失った時に自動でトレイへ隠す設定が有効なら、閉じる操作と同じく配置を保存してから隠し、計測を継続する。ただし枠なしウィンドウの縁を掴んでリサイズを始めると、窓は前面のままなのに一過性のフォーカス喪失イベントが飛ぶ。それで畳むとリサイズできないため、BLUR_HIDE_GRACE だけ待ってから改めてフォーカス状態を見て、本当に前面を失ったままの時だけ畳む。リサイズ中は自分が前面(is_focused が true)なので畳まれず、他アプリへ切り替えた本物の喪失だけが畳まれる。表示中で最小化していない時だけ隠し、既に隠れている時やトレイへ畳んだ直後の余分な発火では何もしない。
+			tauri::WindowEvent::Focused(false) if HIDE_ON_BLUR.load(Ordering::Relaxed) => {
+				let window = window.clone();
+				std::thread::spawn(move || {
+					std::thread::sleep(BLUR_HIDE_GRACE);
+					let app = window.app_handle().clone();
+					let _ = app.run_on_main_thread(move || {
+						if HIDE_ON_BLUR.load(Ordering::Relaxed)
+							&& !window.is_focused().unwrap_or(false)
+							&& window.is_visible().unwrap_or(false)
+							&& !window.is_minimized().unwrap_or(false)
+						{
+							save_window_state(window.app_handle());
+							let _ = window.hide();
+						}
+					});
+				});
+			}
 			_ => {}
 		})
-		.invoke_handler(tauri::generate_handler![get_usage, get_history, set_tray_tooltip, get_settings, set_settings, get_accent_color, get_autostart, set_autostart, win_minimize, win_toggle_maximize, win_is_maximized, win_start_drag, win_close, gauge_icon_rgba])
+		.invoke_handler(tauri::generate_handler![get_usage, get_history, set_tray_tooltip, get_settings, set_settings, get_accent_color, get_autostart, set_autostart, win_minimize, win_toggle_maximize, win_is_maximized, win_start_drag, win_close, quit_app, app_version, gauge_icon_rgba])
 		.run(tauri::generate_context!())
 		.expect("error while running tauri application");
 }
@@ -1846,6 +2335,72 @@ mod tests {
 		// 200文字に切り詰め、末尾へ省略記号を1つ付ける。
 		assert_eq!(e.chars().count(), 201);
 		assert!(e.ends_with('…'));
+	}
+
+
+
+
+	// リセット文字列の壁時計成分を、カンマ区切り・" at " 区切り・分なし・12時制の境目まで取り出せること。
+	#[test]
+	fn parses_reset_components() {
+		assert_eq!(parse_reset_components("Jun 23, 4:10am (Asia/Tokyo)"), Some((6, 23, 4, 10)));
+		assert_eq!(parse_reset_components("Jul 2 at 5:29am (Asia/Tokyo)"), Some((7, 2, 5, 29)));
+		// 分なしの午後表記。7pm は19時。
+		assert_eq!(parse_reset_components("Jun 27, 7pm (Asia/Tokyo)"), Some((6, 27, 19, 0)));
+		// 12am は0時、12pm は12時。
+		assert_eq!(parse_reset_components("Dec 31, 12:00am"), Some((12, 31, 0, 0)));
+		assert_eq!(parse_reset_components("Jan 1, 12:30pm"), Some((1, 1, 12, 30)));
+		// 利用枠以外の文字列は成分を持たない。
+		assert_eq!(parse_reset_components("no reset here"), None);
+	}
+
+
+
+
+	// 中央値は奇数個で中央、偶数個で中央2点の平均。空なら None。
+	#[test]
+	fn median_odd_even_empty() {
+		assert_eq!(median(&[]), None);
+		assert_eq!(median(&[3.0]), Some(3.0));
+		assert_eq!(median(&[1.0, 3.0]), Some(2.0));
+		assert_eq!(median(&[1.0, 2.0, 9.0]), Some(2.0));
+	}
+
+
+
+
+	// 一定ペースで先行し残容量を早く食う系列では、リセット前の枯渇(warn)と到達経過率を投影できること。
+	#[test]
+	fn projects_early_depletion() {
+		let samples = [(0.0, 0.0), (0.25, 40.0), (0.5, 80.0)];
+		let p = project_linear(&samples, 0.5, 80.0).expect("投影が立つこと");
+		assert!(p.warn);
+		// 率160(%/経過率)で残20%を食うと 0.5 + 20/160 = 0.625 で100%到達。
+		assert!((p.hit_t.unwrap() - 0.625).abs() < 1e-3);
+	}
+
+
+
+
+	// 余裕のある系列ではリセットまで枠を割らず(warn=false)、投影線の終点がリセット時点の投影使用%になること。
+	#[test]
+	fn projects_comfortable() {
+		let samples = [(0.0, 0.0), (0.25, 10.0), (0.5, 20.0)];
+		let p = project_linear(&samples, 0.5, 20.0).expect("投影が立つこと");
+		assert!(!p.warn);
+		// 枠を割らないため end は経過率1.0(リセット時点)まで伸び、その使用%が投影使用%。
+		assert!((p.end.0 - 1.0).abs() < 1e-6);
+		assert!((p.end.1 - 40.0).abs() < 1e-3);
+	}
+
+
+
+
+	// 実測点の張る範囲が狭い序盤は投影を控えて None を返すこと。
+	#[test]
+	fn projection_withheld_when_span_too_small() {
+		let samples = [(0.48, 79.0), (0.5, 80.0)];
+		assert!(project_linear(&samples, 0.5, 80.0).is_none());
 	}
 
 

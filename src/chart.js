@@ -693,9 +693,9 @@ const AUTOFRAME_MIN_TSPAN = 0.1;
 // 自動枠取りで確保する縦の最小表示幅(%)。寄せすぎて一点へ潰れるのを防ぐ。
 const AUTOFRAME_MIN_VSPAN = 12;
 
-// 手動操作前の既定の表示範囲をデータから決める。経過率が後半に達していれば、now を横の中央へ置いて左に同じだけの実績・右に投影が載るよう横範囲を取り、枠内に入る実績・投影・帯の最小値より少し下を縦の下端、上端は常に 100% にして、右上の要所を大きく見せる。後半に達していなければ縦横とも全体表示にする。
-function autoFrame(view, s, proj, nowT, lastV) {
-	if (nowT < AUTOFRAME_NOW_MIN) {
+// 手動操作前の既定の表示範囲をデータから決める。経過率が後半に達していれば、now を横の中央へ置いて左に同じだけの実績・右に投影が載るよう横範囲を取り、枠内に入る実績・投影・帯の最小値より少し下を縦の下端、上端は常に 100% にして、右上の要所を大きく見せる。後半に達していなければ縦横とも全体表示にする。fullView が真の枠は後半でもズームせず常に全体表示にする。
+function autoFrame(view, s, proj, nowT, lastV, fullView) {
+	if (fullView || nowT < AUTOFRAME_NOW_MIN) {
 		view.t0 = 0;
 		view.t1 = 1;
 		view.v0 = 0;
@@ -789,7 +789,7 @@ function drawBurndown(draw, view, redraw) {
 	// 手動操作がまだなら、データから既定の表示範囲を決める。手動でズーム・移動した後はその範囲を保つ。
 	if (!view.manual) {
 		if (s.length >= 2 && nowT != null) {
-			autoFrame(view, s, proj, nowT, lastV);
+			autoFrame(view, s, proj, nowT, lastV, draw.fullView);
 		} else {
 			view.t0 = 0;
 			view.t1 = 1;
@@ -963,6 +963,7 @@ export function renderUsageChart(mount, cfg) {
 		startMs,
 		span,
 		profile,
+		fullView: cfg.fullView === true,
 	};
 	const view = getView(cfg.key);
 	const redraw = () => drawBurndown(draw, view, redraw);
@@ -1198,7 +1199,12 @@ export function renderHeatmap(mount, history, key, now) {
 	for (let h = 0; h < 24; h++) {
 		const head = document.createElement("div");
 		head.className = "h-hour";
-		head.textContent = h % 4 === 0 ? String(h) : "";
+		// 現在の時刻ヘッダを曜日ラベルと同じタブ調で強調する。
+		if (h === nowHour) {
+			head.classList.add("now-hour");
+		}
+		// 4刻みの目盛りに加え、現在時刻は目盛り位置でなくとも必ず数字を出す。
+		head.textContent = (h % 4 === 0 || h === nowHour) ? String(h) : "";
 		grid.appendChild(head);
 	}
 

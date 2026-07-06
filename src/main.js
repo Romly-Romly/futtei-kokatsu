@@ -7,6 +7,9 @@ import { resolveLocale, buildDict, applyI18n, translate } from "./i18n.js";
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
+// 実行中プラットフォームが macOS か。ショートカットの表記(Ctrl↔⌘)や、ネイティブメニューと重複するキー処理の抑制に使う。
+const isMac = navigator.userAgent.includes("Macintosh");
+
 // 表示する2つの利用枠。key は get_usage が返すフィールド名に対応する。shortKey はトレイのツールチップ向け短縮ラベルの辞書キー。
 const METERS = [
 	{ key: "session", shortKey: "meter.session.short", windowMs: 5 * 3600 * 1000 },
@@ -502,7 +505,8 @@ function renderCharts()
 {
 	const now = new Date();
 	const windows = [
-		{ key: "session", mount: sessionChartEl, badge: sessionVerdictEl, windowMs: 5 * 3600 * 1000, timeLabel: "time" },
+		// セッション枠は5時間ぶんと短く、チャートが最小サイズでも全体が読めるため、後半での自動枠取り(右上へのズーム)を効かせず常に全体表示にする。週枠は7日と長いので自動枠取りを残す。
+		{ key: "session", mount: sessionChartEl, badge: sessionVerdictEl, windowMs: 5 * 3600 * 1000, timeLabel: "time", fullView: true },
 		{ key: "week_all", mount: weekChartEl, badge: weekVerdictEl, windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date" },
 	];
 
@@ -522,6 +526,7 @@ function renderCharts()
 			windowMs: w.windowMs,
 			now,
 			timeLabel: w.timeLabel,
+			fullView: w.fullView,
 		});
 		setBadge(w.badge, verdict);
 	}
@@ -804,7 +809,7 @@ async function initSettings()
 	}
 	catch (e)
 	{
-		settings = { theme: "system", language: "system", show_trend: true, date_format: "intl", heat_palette: "standard" };
+		settings = { theme: "system", language: "system", show_trend: true, date_format: "intl", heat_palette: "standard", tray_style: "burndown-session", hide_on_blur: false };
 	}
 
 	const legacy = localStorage.getItem("dateFormat");
@@ -844,6 +849,7 @@ function applySettingsToUi()
 	setHeatPalette(settings.heat_palette || "standard");
 	trendSectionEl.hidden = !settings.show_trend;
 	document.querySelector("#trend-toggle").checked = !!settings.show_trend;
+	document.querySelector("#blur-hide-toggle").checked = !!settings.hide_on_blur;
 	setSegmentedActive("#theme-seg", settings.theme);
 	setSegmentedActive("#lang-seg", settings.language);
 	setSegmentedActive("#datefmt-seg", settings.date_format);
@@ -870,6 +876,7 @@ function applyLanguage()
 	document.documentElement.lang = locale;
 	// 選択肢名は applyI18n が入れ替えるため、その後でピッカーの表示(選択中ボタンの名前と各帯)を取り直す。
 	updateHeatCombo();
+	updateTrayCombo();
 }
 
 
@@ -951,6 +958,95 @@ function bindSegmented(selector, onChange)
 
 
 
+// 自前ドロップダウン(コンボボックス)の共通の対話を配線する。トリガーでの開閉、一覧・外側クリックや Esc での閉じ、上下キーでの移動、Enter/Space・クリックでの選択を受け持ち、選ばれた値で choose(value) を呼ぶ。選択肢の中身(名前や配色の帯)は呼び出し側が用意する。
+function wireCombo(combo, trigger, list, choose)
+{
+	const options = () => Array.from(list.querySelectorAll(".combo-option"));
+	const focusOption = (i) => {
+		const opts = options();
+		if (opts[i]) {
+			opts[i].focus();
+		}
+	};
+	const close = () => {
+		list.hidden = true;
+		trigger.setAttribute("aria-expanded", "false");
+	};
+	const open = () => {
+		list.hidden = false;
+		trigger.setAttribute("aria-expanded", "true");
+	};
+	const pick = (value) => {
+		choose(value);
+		close();
+		trigger.focus();
+	};
+
+	trigger.addEventListener("click", () => {
+		if (list.hidden) {
+			open();
+		} else {
+			close();
+		}
+	});
+
+	list.addEventListener("click", (event) => {
+		const opt = event.target.closest(".combo-option");
+		if (!opt || !list.contains(opt)) {
+			return;
+		}
+		pick(opt.dataset.value);
+	});
+
+	// ピッカーの外側をクリックしたら閉じる。設定ビュー内の別のコントロールへ移っても開きっぱなしにしない。
+	document.addEventListener("click", (event) => {
+		if (!combo.contains(event.target)) {
+			close();
+		}
+	});
+
+	combo.addEventListener("keydown", (event) => {
+		if (event.key === "Escape") {
+			if (!list.hidden) {
+				close();
+				trigger.focus();
+			}
+			return;
+		}
+		if (list.hidden) {
+			// 閉じている時は下キーで開いて先頭へ移る。Enter/Space はボタンの既定動作(開閉の切り替え)に任せる。
+			if (event.key === "ArrowDown") {
+				event.preventDefault();
+				open();
+				focusOption(0);
+			}
+			return;
+		}
+		const opts = options();
+		const at = opts.indexOf(document.activeElement);
+		if (event.key === "ArrowDown") {
+			event.preventDefault();
+			focusOption(at < 0 ? 0 : Math.min(opts.length - 1, at + 1));
+		} else if (event.key === "ArrowUp") {
+			event.preventDefault();
+			focusOption(at <= 0 ? 0 : at - 1);
+		} else if (event.key === "Enter" || event.key === " ") {
+			if (at >= 0) {
+				event.preventDefault();
+				pick(opts[at].dataset.value);
+			}
+		}
+	});
+}
+
+
+
+
+
+
+
+
+
 // 配色ピッカーの表示を現在の設定へ合わせる。各選択肢と閉じた時のボタンへ、パレット名とその帯グラデを反映する。グレイスケールの帯は現テーマで解決されるため、テーマ切替時もこれを呼ぶ。名前は applyI18n が選択肢へ入れた文字を写すので、言語反映の後に呼ぶ。
 function updateHeatCombo()
 {
@@ -1015,87 +1111,12 @@ function buildHeatCombo()
 		list.appendChild(opt);
 	}
 
-	const options = () => Array.from(list.querySelectorAll(".combo-option"));
-	const focusOption = (i) => {
-		const opts = options();
-		if (opts[i]) {
-			opts[i].focus();
-		}
-	};
-	const close = () => {
-		list.hidden = true;
-		trigger.setAttribute("aria-expanded", "false");
-	};
-	const open = () => {
-		list.hidden = false;
-		trigger.setAttribute("aria-expanded", "true");
-	};
-	const choose = (value) => {
+	wireCombo(combo, trigger, list, (value) => {
 		settings.heat_palette = value;
 		setHeatPalette(value);
 		updateHeatCombo();
 		render();
 		saveSettings();
-	};
-
-	trigger.addEventListener("click", () => {
-		if (list.hidden) {
-			open();
-		} else {
-			close();
-		}
-	});
-
-	list.addEventListener("click", (event) => {
-		const opt = event.target.closest(".combo-option");
-		if (!opt || !list.contains(opt)) {
-			return;
-		}
-		choose(opt.dataset.value);
-		close();
-		trigger.focus();
-	});
-
-	// ピッカーの外側をクリックしたら閉じる。設定ビュー内の別のコントロールへ移っても開きっぱなしにしない。
-	document.addEventListener("click", (event) => {
-		if (!combo.contains(event.target)) {
-			close();
-		}
-	});
-
-	combo.addEventListener("keydown", (event) => {
-		if (event.key === "Escape") {
-			if (!list.hidden) {
-				close();
-				trigger.focus();
-			}
-			return;
-		}
-		if (list.hidden) {
-			// 閉じている時は下キーで開いて先頭へ移る。Enter/Space はボタンの既定動作(開閉の切り替え)に任せる。
-			if (event.key === "ArrowDown") {
-				event.preventDefault();
-				open();
-				focusOption(0);
-			}
-			return;
-		}
-		const opts = options();
-		const at = opts.indexOf(document.activeElement);
-		if (event.key === "ArrowDown") {
-			event.preventDefault();
-			focusOption(at < 0 ? 0 : Math.min(opts.length - 1, at + 1));
-		} else if (event.key === "ArrowUp") {
-			event.preventDefault();
-			focusOption(at <= 0 ? 0 : at - 1);
-		} else if (event.key === "Enter" || event.key === " ") {
-			if (at >= 0) {
-				event.preventDefault();
-				choose(opts[at].dataset.value);
-				close();
-				trigger.focus();
-			}
-		}
 	});
 }
 
@@ -1104,6 +1125,73 @@ function buildHeatCombo()
 
 
 
+
+
+
+
+// トレイアイコンのピッカーの表示を現在の設定へ合わせる。選択中の選択肢へ aria-selected を立て、閉じた時のボタンへその名前を写す。名前は applyI18n が選択肢へ入れた文字を写すため、言語反映の後に呼ぶ。
+function updateTrayCombo()
+{
+	const list = document.querySelector("#tray-combo-list");
+	if (!list)
+		return;
+
+	const current = settings.tray_style || "burndown-session";
+	for (const opt of list.querySelectorAll(".combo-option"))
+	{
+		const selected = opt.dataset.value === current;
+		opt.setAttribute("aria-selected", selected ? "true" : "false");
+		if (selected)
+		{
+			const name = opt.querySelector(".combo-name");
+			document.querySelector("#tray-combo-name").textContent = name ? name.textContent : opt.dataset.value;
+		}
+	}
+}
+
+
+
+
+
+
+
+
+
+// トレイアイコンのピッカーを配線する。選択肢は index.html に静的に置いてあるため、開閉・選択の対話だけを共通処理へ委ねる。選択時は設定を書き換えて保存し、Rust 側がトレイアイコンを描き直す。
+function buildTrayCombo()
+{
+	const combo = document.querySelector("#tray-combo");
+	const trigger = document.querySelector("#tray-combo-trigger");
+	const list = document.querySelector("#tray-combo-list");
+	if (!combo || !trigger || !list)
+		return;
+
+	wireCombo(combo, trigger, list, (value) => {
+		settings.tray_style = value;
+		updateTrayCombo();
+		saveSettings();
+	});
+}
+
+
+
+
+
+
+
+
+
+// 消費傾向ヒートマップの表示/非表示を切り替える。設定値・セクションの表示・設定画面のトグルの見えをまとめて合わせ、右クリックメニューと設定トグルのどちらから変えても両者が食い違わないようにする。
+function setShowTrend(on)
+{
+	settings.show_trend = on;
+	trendSectionEl.hidden = !on;
+	const toggle = document.querySelector("#trend-toggle");
+	if (toggle)
+		toggle.checked = on;
+
+	saveSettings();
+}
 
 
 
@@ -1131,10 +1219,14 @@ function wireSettings()
 		saveSettings();
 	});
 	buildHeatCombo();
+	buildTrayCombo();
 
 	document.querySelector("#trend-toggle").addEventListener("change", (event) => {
-		settings.show_trend = event.target.checked;
-		trendSectionEl.hidden = !settings.show_trend;
+		setShowTrend(event.target.checked);
+	});
+
+	document.querySelector("#blur-hide-toggle").addEventListener("change", (event) => {
+		settings.hide_on_blur = event.target.checked;
 		saveSettings();
 	});
 
@@ -1244,13 +1336,154 @@ function wireTitlebar()
 
 
 
-// release ビルドでのみ、WebView2 のブラウザらしい操作を封じてネイティブアプリらしくする。右クリックの既定メニュー(再読み込み・戻る・検証)と、F5・Ctrl+R によるリロード、F12 などの devtools 起動キーを抑止する。dev ビルドでは調査の妨げになるため何もしない。
+// 右クリックメニューの各項目に対応する動作を起こす。更新・設定・消費傾向の切替はフロントの既存処理をそのまま呼び、ウィンドウを閉じる/終了は Rust コマンドへ回す。閉じる(win_close)は CloseRequested 経由でトレイへ隠して計測を続け、終了(quit_app)は配置を保存してプロセスを終える。
+function runMenuAction(action)
+{
+	switch (action)
+	{
+		case "refresh":
+			refresh();
+			break;
+		case "settings":
+			showSettings();
+			break;
+		case "trend":
+			if (settings)
+				setShowTrend(!settings.show_trend);
+			break;
+		case "close":
+			invoke("win_close");
+			break;
+		case "quit":
+			invoke("quit_app");
+			break;
+	}
+}
+
+
+
+
+// 右クリックメニューのショートカット表記を実行中プラットフォームへ合わせる。HTML には Windows の Ctrl 表記を持たせてあり、macOS では ⌘ 表記へ差し替える。実際のキー処理は Windows が keydown、macOS がネイティブのアプリメニューで担う。
+function applyMenuShortcutLabels()
+{
+	if (!isMac)
+		return;
+
+	const labels = { refresh: "⌘R", settings: "⌘,", close: "⌘W" };
+	for (const item of document.querySelectorAll("#context-menu .ctx-item"))
+	{
+		const shortcut = item.querySelector(".ctx-shortcut");
+		const label = labels[item.dataset.action];
+		if (shortcut && label)
+			shortcut.textContent = label;
+	}
+}
+
+
+
+
+// メインウィンドウの右クリックメニューを配線する。右クリックで自前メニューを開き、項目のクリックで動作を起こす。外側クリック・Esc・スクロール・リサイズ・フォーカス喪失で閉じ、上下キーで項目を辿れるようにする。文言と表示切替のチェック状態は開くたびに現在の設定へ合わせる。
+function wireContextMenu()
+{
+	const menu = document.querySelector("#context-menu");
+	if (!menu)
+		return;
+
+	applyMenuShortcutLabels();
+
+	const items = () => Array.from(menu.querySelectorAll(".ctx-item"));
+
+	const focusItem = (i) => {
+		const list = items();
+		if (list[i])
+			list[i].focus();
+	};
+
+	const closeMenu = () => {
+		if (menu.hidden)
+			return;
+		menu.hidden = true;
+	};
+
+	const openMenuAt = (x, y) => {
+		// チェック項目(消費傾向の表示)の見えを現在の設定へ合わせてから開く。
+		const trendItem = menu.querySelector('[data-action="trend"]');
+		if (trendItem)
+			trendItem.setAttribute("aria-checked", settings && settings.show_trend ? "true" : "false");
+
+		// クリック位置へ置いてから表示し、寸法を測ってビューポートからはみ出す分だけ内側へ寄せる。先に位置を当てることで、旧位置での一瞬のちらつきを避ける。
+		const margin = 6;
+		menu.style.left = `${x}px`;
+		menu.style.top = `${y}px`;
+		menu.hidden = false;
+		const rect = menu.getBoundingClientRect();
+		let left = x;
+		let top = y;
+		if (left + rect.width + margin > window.innerWidth)
+			left = window.innerWidth - rect.width - margin;
+		if (top + rect.height + margin > window.innerHeight)
+			top = window.innerHeight - rect.height - margin;
+		menu.style.left = `${Math.max(margin, left)}px`;
+		menu.style.top = `${Math.max(margin, top)}px`;
+
+		// キーボード操作の受け皿としてコンテナへ focus を移す。項目へ直接移さないことで、右クリックで開いた直後に項目へ枠が付くのを避ける。
+		menu.focus();
+	};
+
+	// 右クリック(・メニューキー)で既定のメニューを止め、自前メニューを開く。dev・release とも自前メニューへ置き換える。
+	window.addEventListener("contextmenu", (event) => {
+		event.preventDefault();
+		openMenuAt(event.clientX, event.clientY);
+	});
+
+	// 項目を選んだらメニューを閉じて対応する動作を起こす。
+	menu.addEventListener("click", (event) => {
+		const item = event.target.closest(".ctx-item");
+		if (!item || !menu.contains(item))
+			return;
+		closeMenu();
+		runMenuAction(item.dataset.action);
+	});
+
+	// メニュー外の押下で閉じる。押下時点で判定することで、項目クリックの流れ(押下はメニュー内)を邪魔しない。
+	document.addEventListener("mousedown", (event) => {
+		if (!menu.hidden && !menu.contains(event.target))
+			closeMenu();
+	});
+	// 窓のフォーカス喪失・リサイズ・本体のスクロールでは位置がずれるため閉じる。スクロールは window-body が担うため、そこで捕捉する。
+	window.addEventListener("blur", closeMenu);
+	window.addEventListener("resize", closeMenu);
+	document.querySelector(".window-body").addEventListener("scroll", closeMenu, true);
+
+	menu.addEventListener("keydown", (event) => {
+		const list = items();
+		const at = list.indexOf(document.activeElement);
+		if (event.key === "Escape")
+		{
+			closeMenu();
+		}
+		else if (event.key === "ArrowDown")
+		{
+			event.preventDefault();
+			focusItem(at < 0 ? 0 : Math.min(list.length - 1, at + 1));
+		}
+		else if (event.key === "ArrowUp")
+		{
+			event.preventDefault();
+			focusItem(at < 0 ? list.length - 1 : Math.max(0, at - 1));
+		}
+		// Enter/Space は項目(button)の既定動作(click)へ任せる。
+	});
+}
+
+
+
+
+// release ビルドでのみ、WebView2 のリロード・devtools 起動キーを封じてネイティブアプリらしくする。F5・Ctrl+R によるリロードと、F12 などの devtools 起動キーを抑止する。右クリックの既定メニューは wireContextMenu が dev・release とも自前メニューへ置き換えるためここでは扱わない。dev ビルドではキー操作は調査の妨げになるため抑止しない。
 function suppressWebChrome()
 {
 	if (!import.meta.env.PROD)
 		return;
-
-	window.addEventListener("contextmenu", (e) => e.preventDefault());
 
 	window.addEventListener("keydown", (e) => {
 		const ctrl = e.ctrlKey || e.metaKey;
@@ -1332,10 +1565,29 @@ async function applyAccentColor()
 
 
 
+// タイトルバーのアプリ名の右へバージョンを表示する。値は tauri.conf.json 由来の PackageInfo から Rust の app_version が返すため、トレイメニューの見出しと出所が揃い、二重管理にならない。取得に失敗したらバージョン表示は空のままにする。
+async function applyAppVersion()
+{
+	try
+	{
+		const version = await invoke("app_version");
+		const el = document.querySelector("#titlebar-version");
+		if (el && version)
+			el.textContent = `v${version}`;
+	}
+	catch (e)
+	{
+		// バージョン表示は補助情報のため、取得失敗は握りつぶす
+	}
+}
+
+
+
+
 // macOS では OS 標準のタイトルバー(信号機ボタン)を活かすため、<html> に is-mac クラスを付ける。styles.css がこのクラスで自前のキャプションボタンを隠し、左上へ重なる信号機ボタンのぶんドラッグ領域に余白を空ける。Windows・Linux ではマッチせずクラスは付かないため、既定のレイアウトのまま変わらない。
 function applyPlatformClass()
 {
-	if (navigator.userAgent.includes("Macintosh"))
+	if (isMac)
 		document.documentElement.classList.add("is-mac");
 }
 
@@ -1352,6 +1604,7 @@ window.addEventListener("DOMContentLoaded", () => {
 	applyPlatformClass();
 	suppressWebChrome();
 	applyAccentColor();
+	applyAppVersion();
 
 	statusEl = document.querySelector("#status");
 	errorEl = document.querySelector("#error");
@@ -1372,6 +1625,7 @@ window.addEventListener("DOMContentLoaded", () => {
 	panelEls = Array.from(document.querySelectorAll(".panels > .panel"));
 
 	wireTitlebar();
+	wireContextMenu();
 	wireSettings();
 	initSettings();
 
@@ -1385,6 +1639,26 @@ window.addEventListener("DOMContentLoaded", () => {
 	// macOS のアプリメニューの「更新」から届く合図。手動更新ボタンと同じ経路で利用枠を取り直す。
 	listen("trigger-refresh", () => {
 		refresh();
+	});
+	// メインウィンドウのキーボードショートカット。修飾キー(Windows は Ctrl、macOS は Cmd)ちょうどの押下に限り、Alt/Shift 併用や押しっぱなしの連続発火は弾く。更新(Ctrl+R)と設定(Ctrl+,)は Windows で受け、macOS は同じ動作をネイティブのアプリメニュー(Cmd+R / Cmd+,)が担うため二重発火を避けてここでは扱わない。閉じる(Ctrl+W / Cmd+W)は両プラットフォームで受ける。
+	window.addEventListener("keydown", (event) => {
+		const mod = (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey;
+		if (!mod || event.repeat) {
+			return;
+		}
+		if (event.code === "KeyW") {
+			event.preventDefault();
+			// タイトルバーの閉じるボタンと同じ win_close を呼ぶ。Rust 側が CloseRequested を横取りしてトレイへ隠すため、アプリは終了せず計測を続ける。
+			invoke("win_close");
+		} else if (!isMac && event.code === "KeyR") {
+			// 手動更新ボタンと同じく利用枠を取り直す。WebView 既定の再読み込みは止める。
+			event.preventDefault();
+			refresh();
+		} else if (!isMac && event.code === "Comma") {
+			// 設定ビューを開く。
+			event.preventDefault();
+			showSettings();
+		}
 	});
 	// ウィンドウが前面に戻るたびにアクセント色を読み直し、起動後に OS のアクセントを変えても追従させる。
 	window.addEventListener("focus", () => {

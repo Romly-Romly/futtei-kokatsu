@@ -105,6 +105,15 @@ body {
 	text-overflow: ellipsis;
 }
 
+/* タイトルバーのアプリ名の右へ添えるバージョン。名前より一段淡い色と小さい字で控えめに見せ、名前が縮むより先にこちらは詰めない(flex-shrink:0)。 */
+.titlebar-version {
+	flex-shrink: 0;
+	margin-left: 6px;
+	font-size: 0.66rem;
+	color: #8a8a8a;
+	white-space: nowrap;
+}
+
 .titlebar-controls {
 	display: flex;
 	flex-shrink: 0;
@@ -427,6 +436,87 @@ body {
 .combo-option:focus-visible {
 	outline: 2px solid var(--accent);
 	outline-offset: -2px;
+}
+
+/* メインウィンドウの右クリックで開く自前のコンテキストメニュー。位置はビューポート基準(fixed)で、開く際に main.js が left/top を当てる。地・枠・影はコンボの一覧に揃えて見た目を統一する。 */
+.context-menu {
+	position: fixed;
+	z-index: 1000;
+	min-width: 200px;
+	margin: 0;
+	padding: 4px;
+	border: 1px solid rgba(0, 0, 0, 0.12);
+	border-radius: 8px;
+	/* すりガラス。半透明の地に強めのぼかしと彩度上げを重ね、背後のアプリ内容を Acrylic 風に透かす。WebView2(Chromium)・WKWebView とも backdrop-filter に対応する。macOS 用に -webkit- 付きを併記する。 */
+	background-color: rgba(255, 255, 255, 0.92);
+	-webkit-backdrop-filter: blur(24px) saturate(180%);
+	backdrop-filter: blur(24px) saturate(180%);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.context-menu[hidden] {
+	display: none;
+}
+
+/* コンテナ自身はキーボード操作の受け皿として focus を取るが、枠は出さず、選択の見えは項目側の背景で示す。 */
+.context-menu:focus,
+.context-menu:focus-visible {
+	outline: none;
+}
+
+.ctx-item {
+	appearance: none;
+	position: relative;
+	display: flex;
+	align-items: center;
+	width: 100%;
+	/* 左端にチェック記号の余地を空け、チェック項目と通常項目の文字の始まりを揃える。 */
+	padding: 7px 14px 7px 30px;
+	border: none;
+	border-radius: 6px;
+	background-color: transparent;
+	color: #0f0f0f;
+	font-family: inherit;
+	font-size: 0.8rem;
+	font-weight: 400;
+	text-align: left;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+/* 項目名の右へ添えるショートカット表記。名前を左、ショートカットを右端(margin-left:auto)へ寄せ、控えめな色で主張しすぎないようにする。 */
+.ctx-shortcut {
+	margin-left: auto;
+	padding-left: 24px;
+	font-size: 0.72rem;
+	color: #8a8a8a;
+}
+
+.ctx-item:hover,
+.ctx-item:focus-visible {
+	background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+	outline: none;
+}
+
+/* チェック記号は左の余白へ絶対配置で置き、チェック状態のときだけ見せる。項目の文字位置は状態に依らず一定に保つ。 */
+.ctx-check-mark {
+	position: absolute;
+	left: 10px;
+	top: 50%;
+	transform: translateY(-50%);
+	color: var(--accent);
+	visibility: hidden;
+}
+
+.ctx-item[aria-checked="true"] .ctx-check-mark {
+	visibility: visible;
+}
+
+/* 項目群を島に分ける区切り線。上下に薄い間を空ける。 */
+.ctx-sep {
+	height: 1px;
+	margin: 4px 6px;
+	background-color: rgba(0, 0, 0, 0.1);
 }
 
 /* オン・オフのトグルスイッチ。 */
@@ -767,9 +857,11 @@ button:disabled {
 	background-color: color-mix(in srgb, var(--heat-zero) 20%, transparent);
 }
 
-/* 今この瞬間のセル(今日×現在時刻)。バーンダウンの現在マーカーと同色の枠で「今ここ」を指す。塗りには触れず枠だけ重ねるので、空・未消費・消費ありのどの状態にも乗る。 */
+/* 今この瞬間のセル(今日×現在時刻)。塗りには触れず枠だけ重ねるので、空・未消費・消費ありのどの状態にも乗る。パレットのどの塗り色に乗っても埋没しないよう、内側に白と黒の二重枠を重ね、どちらか一方が必ず地色と対比するようにする。 */
 .heat .h-cell.now {
-	box-shadow: inset 0 0 0 1.5px var(--chart-now);
+	box-shadow:
+		inset 0 0 0 1px #ffffff,
+		inset 0 0 0 2px #000000;
 }
 
 .heat .h-day {
@@ -798,6 +890,14 @@ button:disabled {
 	line-height: 1;
 	font-size: var(--heat-hour-fontsize);
 	color: var(--chart-faint);
+}
+
+/* 現在時刻の時刻ヘッダ。今日の曜日ラベルと同じく淡いアクセント地にアクセント色の太字を載せたタブにして、現在の列をすぐ見つけられるようにする。 */
+.heat .h-hour.now-hour {
+	border-radius: var(--heat-radius);
+	background-color: var(--chart-area);
+	color: var(--chart-line);
+	font-weight: 700;
 }
 
 .heat-hint {
@@ -956,6 +1056,28 @@ button:disabled {
 		background-color: #2b2b2b;
 		border-color: rgba(255, 255, 255, 0.14);
 		box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+	}
+
+	.titlebar-version {
+		color: #8a8a8a;
+	}
+
+	.context-menu {
+		background-color: rgba(40, 40, 40, 0.92);
+		border-color: rgba(255, 255, 255, 0.12);
+		box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+	}
+
+	.ctx-item {
+		color: #f6f6f6;
+	}
+
+	.ctx-shortcut {
+		color: #9a9a9a;
+	}
+
+	.ctx-sep {
+		background-color: rgba(255, 255, 255, 0.14);
 	}
 
 	.combo-swatch {

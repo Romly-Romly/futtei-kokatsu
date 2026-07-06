@@ -15,6 +15,7 @@
 			<div class="titlebar-drag" id="titlebar-drag">
 				<canvas id="titlebar-gauge" class="titlebar-gauge" width="0" height="0" aria-hidden="true" hidden></canvas>
 				<span class="titlebar-title" data-i18n="app.name">払底枯渇</span>
+				<span class="titlebar-version" id="titlebar-version" aria-hidden="true"></span>
 			</div>
 			<div class="titlebar-controls">
 				<button type="button" class="tb-btn" id="tb-min" aria-label="最小化" title="最小化" data-i18n-aria-label="titlebar.minimize" data-i18n-title="titlebar.minimize"><span class="tb-ico" aria-hidden="true">&#xE921;</span></button>
@@ -66,23 +67,24 @@
 				</section>
 			</main>
 			<main class="settings-view" id="view-settings" hidden>
+				<!-- このビューの文言は locales/*.json を唯一の出所とし、applyI18n が起動時に data-i18n 要素へ流し込む。ビューは hidden で始まり、表示される前に必ず applyI18n が走るため、繋ぎ表示用の直書きテキストは持たせず空にしてある。表示が i18n 適用より先に出うるメイン画面 (view-main) は、空白のちらつきを避けるため直書きを残す。 -->
 				<button id="settings-back" class="back-btn" type="button">
 					<span aria-hidden="true">←</span>
-					<span data-i18n="settings.back">戻る</span>
+					<span data-i18n="settings.back"></span>
 				</button>
 				<div class="settings-body">
-					<h1 class="settings-title" data-i18n="settings.title">設定</h1>
+					<h1 class="settings-title" data-i18n="settings.title"></h1>
 					<div class="card">
 						<div class="row">
 							<div class="row-text">
-								<div class="row-title" data-i18n="settings.theme.title">テーマ</div>
-								<div class="row-desc" data-i18n="settings.theme.desc">アプリの配色。システム設定に従うか、ライト・ダークを選びます。</div>
+								<div class="row-title" data-i18n="settings.theme.title"></div>
+								<div class="row-desc" data-i18n="settings.theme.desc"></div>
 							</div>
 							<div class="row-control">
 								<div class="segmented" id="theme-seg" role="group">
-									<button type="button" data-value="system" data-i18n="settings.theme.system">システム</button>
-									<button type="button" data-value="light" data-i18n="settings.theme.light">ライト</button>
-									<button type="button" data-value="dark" data-i18n="settings.theme.dark">ダーク</button>
+									<button type="button" data-value="system" data-i18n="settings.theme.system"></button>
+									<button type="button" data-value="light" data-i18n="settings.theme.light"></button>
+									<button type="button" data-value="dark" data-i18n="settings.theme.dark"></button>
 								</div>
 							</div>
 						</div>
@@ -90,14 +92,14 @@
 					<div class="card">
 						<div class="row">
 							<div class="row-text">
-								<div class="row-title" data-i18n="settings.language.title">表示言語</div>
-								<div class="row-desc" data-i18n="settings.language.desc">メニューと設定画面の表示言語。</div>
+								<div class="row-title" data-i18n="settings.language.title"></div>
+								<div class="row-desc" data-i18n="settings.language.desc"></div>
 							</div>
 							<div class="row-control">
 								<div class="segmented" id="lang-seg" role="group">
-									<button type="button" data-value="system" data-i18n="settings.language.system">システムに合わせる</button>
-									<button type="button" data-value="ja" data-i18n="settings.language.ja">日本語</button>
-									<button type="button" data-value="en" data-i18n="settings.language.en">English</button>
+									<button type="button" data-value="system" data-i18n="settings.language.system"></button>
+									<button type="button" data-value="ja" data-i18n="settings.language.ja"></button>
+									<button type="button" data-value="en" data-i18n="settings.language.en"></button>
 								</div>
 							</div>
 						</div>
@@ -105,8 +107,35 @@
 					<div class="card">
 						<div class="row">
 							<div class="row-text">
-								<div class="row-title" data-i18n="settings.trend.title">消費傾向の表示</div>
-								<div class="row-desc" data-i18n="settings.trend.desc">曜日と時間帯ごとの消費ヒートマップを表示します。</div>
+								<div class="row-title" data-i18n="settings.tray.title"></div>
+								<div class="row-desc" data-i18n="settings.tray.desc"></div>
+							</div>
+							<div class="row-control">
+								<div class="combo" id="tray-combo">
+									<button type="button" class="combo-trigger" id="tray-combo-trigger" aria-haspopup="listbox" aria-expanded="false">
+										<span class="combo-name" id="tray-combo-name"></span>
+										<span class="combo-caret" aria-hidden="true"></span>
+									</button>
+									<ul class="combo-list" id="tray-combo-list" role="listbox" tabindex="-1" hidden>
+										<li class="combo-option" role="option" data-value="burndown-session" tabindex="-1">
+											<span class="combo-name" data-i18n="settings.tray.session"></span>
+										</li>
+										<li class="combo-option" role="option" data-value="burndown-week" tabindex="-1">
+											<span class="combo-name" data-i18n="settings.tray.week"></span>
+										</li>
+										<li class="combo-option" role="option" data-value="gauge" tabindex="-1">
+											<span class="combo-name" data-i18n="settings.tray.gauge"></span>
+										</li>
+									</ul>
+								</div>
+							</div>
+						</div>
+					</div>
+					<div class="card">
+						<div class="row">
+							<div class="row-text">
+								<div class="row-title" data-i18n="settings.trend.title"></div>
+								<div class="row-desc" data-i18n="settings.trend.desc"></div>
 							</div>
 							<div class="row-control">
 								<label class="switch">
@@ -119,8 +148,8 @@
 					<div class="card">
 						<div class="row">
 							<div class="row-text">
-								<div class="row-title" data-i18n="settings.heat.title">消費傾向の配色</div>
-								<div class="row-desc" data-i18n="settings.heat.desc">曜日×時間帯ヒートマップのカラーパレット。グレイスケールはテーマに合わせて濃淡が反転します。</div>
+								<div class="row-title" data-i18n="settings.heat.title"></div>
+								<div class="row-desc" data-i18n="settings.heat.desc"></div>
 							</div>
 							<div class="row-control">
 								<div class="combo" id="heat-combo">
@@ -137,13 +166,13 @@
 					<div class="card">
 						<div class="row">
 							<div class="row-text">
-								<div class="row-title" data-i18n="settings.dateformat.title">日付の表示形式</div>
-								<div class="row-desc" data-i18n="settings.dateformat.desc">リセット時刻などの日付の書き方。海外式 (Jun 27, 2:40pm) か 日本式 (6/27 14:40)。</div>
+								<div class="row-title" data-i18n="settings.dateformat.title"></div>
+								<div class="row-desc" data-i18n="settings.dateformat.desc"></div>
 							</div>
 							<div class="row-control">
 								<div class="segmented" id="datefmt-seg" role="group">
-									<button type="button" data-value="intl" data-i18n="settings.dateformat.intl">海外式</button>
-									<button type="button" data-value="jp" data-i18n="settings.dateformat.jp">日本式</button>
+									<button type="button" data-value="intl" data-i18n="settings.dateformat.intl"></button>
+									<button type="button" data-value="jp" data-i18n="settings.dateformat.jp"></button>
 								</div>
 							</div>
 						</div>
@@ -151,8 +180,8 @@
 					<div class="card">
 						<div class="row">
 							<div class="row-text">
-								<div class="row-title" data-i18n="settings.autostart.title">ログイン時に起動</div>
-								<div class="row-desc" data-i18n="settings.autostart.desc">Windows へのログイン時にこのアプリを自動で起動し、トレイに常駐します。</div>
+								<div class="row-title" data-i18n="settings.autostart.title"></div>
+								<div class="row-desc" data-i18n="settings.autostart.desc"></div>
 							</div>
 							<div class="row-control">
 								<label class="switch">
@@ -162,8 +191,44 @@
 							</div>
 						</div>
 					</div>
+					<div class="card">
+						<div class="row">
+							<div class="row-text">
+								<div class="row-title" data-i18n="settings.hideonblur.title"></div>
+								<div class="row-desc" data-i18n="settings.hideonblur.desc"></div>
+							</div>
+							<div class="row-control">
+								<label class="switch">
+									<input type="checkbox" id="blur-hide-toggle" />
+									<span class="track"></span>
+								</label>
+							</div>
+						</div>
+					</div>
 				</div>
 			</main>
 		</div>
+		<!-- メインウィンドウの右クリックで開く自前のコンテキストメニュー。既定では hidden で置き、開く際に main.js が位置を当てて表示する。文言は他のビューと同じく locales/*.json を出所とし、applyI18n が data-i18n 要素へ流し込む。 -->
+		<nav id="context-menu" class="context-menu" role="menu" tabindex="-1" hidden>
+			<button type="button" class="ctx-item" role="menuitem" data-action="refresh">
+				<span data-i18n="menu.refresh">更新</span>
+				<span class="ctx-shortcut" aria-hidden="true">Ctrl+R</span>
+			</button>
+			<button type="button" class="ctx-item" role="menuitem" data-action="settings">
+				<span data-i18n="menu.settings">設定</span>
+				<span class="ctx-shortcut" aria-hidden="true">Ctrl+,</span>
+			</button>
+			<div class="ctx-sep" role="separator"></div>
+			<button type="button" class="ctx-item" role="menuitemcheckbox" data-action="trend" aria-checked="false">
+				<span class="ctx-check-mark" aria-hidden="true">&#x2713;</span>
+				<span data-i18n="menu.trend">消費傾向を表示</span>
+			</button>
+			<div class="ctx-sep" role="separator"></div>
+			<button type="button" class="ctx-item" role="menuitem" data-action="close">
+				<span data-i18n="menu.close">ウィンドウを閉じる</span>
+				<span class="ctx-shortcut" aria-hidden="true">Ctrl+W</span>
+			</button>
+			<button type="button" class="ctx-item" role="menuitem" data-action="quit" data-i18n="menu.quit">終了</button>
+		</nav>
 	</body>
 </html>

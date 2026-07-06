@@ -1,0 +1,86 @@
+{
+  "fill" : "automatic",
+  "groups" : [
+    {
+      "blend-mode" : "normal",
+      "blur-material" : 0.5,
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "solid" : "display-p3:0.29818,0.87625,0.36918,1.00000"
+          },
+          "image-name" : "outer-fill.png",
+          "name" : "outer-fill",
+          "position" : {
+            "scale" : 0.9,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.95552,0.64991,0.10081,1.00000"
+          },
+          "image-name" : "inner-fill.png",
+          "name" : "inner-fill",
+          "position" : {
+            "scale" : 0.9,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:0.38431,0.38431,0.38431,1.00000"
+          },
+          "glass" : false,
+          "image-name" : "inner-bg.png",
+          "name" : "inner-bg",
+          "position" : {
+            "scale" : 0.9,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:0.38431,0.38431,0.38431,1.00000"
+          },
+          "glass" : false,
+          "image-name" : "outer-bg.png",
+          "name" : "outer-bg",
+          "position" : {
+            "scale" : 0.9,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "lighting" : "individual",
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.6
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.7
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
