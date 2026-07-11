@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 // クリック種別の判定は Windows 側のトレイイベント処理でしか使わない。macOS はメニュー表示をビルダー設定に委ねるためこれらの型を参照しない。
 #[cfg(not(target_os = "macos"))]
@@ -964,6 +964,8 @@ fn set_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), String>
 	apply_theme(&app, &settings);
 	// フォーカス喪失時に隠す設定はウィンドウイベントハンドラが参照するため、保存のたびにランタイムのフラグへ写す。
 	HIDE_ON_BLUR.store(settings.hide_on_blur, Ordering::Relaxed);
+	// 設定画面の図柄ピッカーから変えたときも、トレイメニューの図柄選択のチェックを現在値へ合わせる。
+	sync_tray_style_checks(&app, &settings.tray_style);
 	if let Some(usage) = latest_usage(&app) {
 		update_tray_icon(&app, &usage);
 	}
@@ -2077,9 +2079,48 @@ fn update_window_icon(_app: &tauri::AppHandle, _usage: &Usage) {}
 
 
 
+// トレイメニューの図柄選択で使う CheckMenuItem 3種を保持する。メニューイベントと設定コマンドの双方から選択状態を書き換えられるよう、Tauri の管理状態として持ち回す。
+struct TrayStyleItems {
+	session: CheckMenuItem<tauri::Wry>,
+	week: CheckMenuItem<tauri::Wry>,
+	gauge: CheckMenuItem<tauri::Wry>,
+}
+
+
+
+
+// 図柄選択の CheckMenuItem 3種のうち、指定の図柄に対応する1つだけへチェックを立てて単一選択を保つ。muda はラジオ項目を持たないため CheckMenuItem のチェックで代用する。管理状態が未登録(トレイ構成前)のときは何もしない。
+fn sync_tray_style_checks(app: &tauri::AppHandle, style: &str) {
+	if let Some(items) = app.try_state::<TrayStyleItems>() {
+		let _ = items.session.set_checked(style == "burndown-session");
+		let _ = items.week.set_checked(style == "burndown-week");
+		let _ = items.gauge.set_checked(style == "gauge");
+	}
+}
+
+
+
+
+// トレイメニューの図柄選択から呼ぶ。選んだ図柄を設定へ保存し、メニューのチェックを1つへ揃え、直近の値でトレイアイコンを描き直す。あわせてフロントへ変更を通知し、設定画面のピッカーの表示も追従させる。
+fn select_tray_style(app: &tauri::AppHandle, style: &str) {
+	let mut settings = read_settings(app);
+	settings.tray_style = style.to_string();
+	if let Err(e) = write_settings(app, &settings) {
+		eprintln!("トレイ図柄の設定保存に失敗しました: {}", e);
+	}
+	sync_tray_style_checks(app, style);
+	if let Some(usage) = latest_usage(app) {
+		update_tray_icon(app, &usage);
+	}
+	let _ = app.emit("tray-style-changed", style.to_string());
+}
+
+
+
+
 // トレイアイコンとそのメニューを構成する。窓を閉じてもトレイへ常駐し計測を続けられるようにする。
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-	use tauri::menu::PredefinedMenuItem;
+	use tauri::menu::{PredefinedMenuItem, Submenu};
 
 	// メニュー先頭にアプリ名とバージョンを見出しとして置く。文字列は tauri.conf.json 由来の PackageInfo から引くため、名称やバージョンを変えてもここは追従する。クリックしても何もしない見出しなので非活性にする。
 	let pkg = app.package_info();
@@ -2087,8 +2128,19 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 	let header_separator = PredefinedMenuItem::separator(app)?;
 	let show = MenuItem::with_id(app, "show", "表示", true, None::<&str>)?;
 	let settings = MenuItem::with_id(app, "settings", "設定", true, None::<&str>)?;
+
+	// トレイアイコンに表示する図柄を切り替えるラジオ選択。muda はラジオ項目を持たないため CheckMenuItem を単一選択として扱い、選択のたびに他をチェック解除する。初期チェックは現在の設定に合わせる。ラベルは設定画面の図柄ピッカーの表記に揃える。
+	let style = read_settings(app.handle()).tray_style;
+	let style_session = CheckMenuItem::with_id(app, "tray_style:burndown-session", "セッションバーンダウン", true, style == "burndown-session", None::<&str>)?;
+	let style_week = CheckMenuItem::with_id(app, "tray_style:burndown-week", "週間バーンダウン", true, style == "burndown-week", None::<&str>)?;
+	let style_gauge = CheckMenuItem::with_id(app, "tray_style:gauge", "円グラフ", true, style == "gauge", None::<&str>)?;
+	let style_menu = Submenu::with_items(app, "アイコン", true, &[&style_session, &style_week, &style_gauge])?;
+
 	let quit = MenuItem::with_id(app, "quit", "終了", true, None::<&str>)?;
-	let menu = Menu::with_items(app, &[&header, &header_separator, &show, &settings, &quit])?;
+	let menu = Menu::with_items(app, &[&header, &header_separator, &show, &settings, &style_menu, &quit])?;
+
+	// メニューイベントと設定コマンドの双方から図柄選択のチェックを更新できるよう、CheckMenuItem 3種を管理状態へ預ける。
+	app.manage(TrayStyleItems { session: style_session, week: style_week, gauge: style_gauge });
 
 	let mut builder = TrayIconBuilder::with_id(TRAY_ID)
 		.tooltip("払底枯渇")
@@ -2096,6 +2148,10 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 		.on_menu_event(|app, event| match event.id.as_ref() {
 			"show" => show_main_window(app),
 			"settings" => open_settings(app),
+			// アイコンの図柄のラジオ選択。選んだ図柄を保存し、チェックを1つへ揃えてアイコンを描き直す。
+			"tray_style:burndown-session" => select_tray_style(app, "burndown-session"),
+			"tray_style:burndown-week" => select_tray_style(app, "burndown-week"),
+			"tray_style:gauge" => select_tray_style(app, "gauge"),
 			// 終了前に現在のウィンドウ配置を保存する。トレイから直接終了する場合は CloseRequested を経ないため、ここで保存しないと最後の移動・リサイズが残らない。
 			"quit" => {
 				save_window_state(app);

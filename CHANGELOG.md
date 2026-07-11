@@ -2,6 +2,11 @@
 
 > 🌐 **[日本語 →](CHANGELOG.ja.md)**
 
+## [1.1.1] - 2026-07-11
+
+- Made the tray icon chart (session burndown, weekly burndown, or pie chart) selectable from the tray's right-click menu as well.
+- Collapsed time labels to a single unit when the lower value is exactly zero, so "1 hour 0 minutes ago" or "2 days 0 hours" now read as "1 hour ago" or "2 days ago".
+
 ## [1.1.0] - 2026-07-06
 
 - Added a choice of chart to show in the tray icon (menu bar): session burndown, weekly burndown, or pie chart.

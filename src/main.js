@@ -278,7 +278,7 @@ function renderMeters()
 
 
 
-// 取得時刻から現在までの隔たりを「たった今」「X秒前」「X分前」「X時間Y分前」「X日前」へ整形する。
+// 取得時刻から現在までの隔たりを「たった今」「X秒前」「X分前」「X時間Y分前」(分が0なら「X時間前」)「X日前」へ整形する。
 function relativeAgo(from, now)
 {
 	const sec = Math.max(0, Math.floor((now.getTime() - from.getTime()) / 1000));
@@ -294,7 +294,10 @@ function relativeAgo(from, now)
 
 	const h = Math.floor(min / 60);
 	if (h < 24)
-		return t("time.hoursMinutesAgo", { h, m: min % 60 });
+	{
+		const m = min % 60;
+		return m > 0 ? t("time.hoursMinutesAgo", { h, m }) : t("time.hoursAgo", { h });
+	}
 
 	return t("time.daysAgo", { n: Math.floor(h / 24) });
 }
@@ -699,7 +702,7 @@ function tickCountdowns()
 
 
 
-// 残りミリ秒を分粒度の「X日とY時間」「X時間Y分」「X分」へ整形する。ツールチップは秒まで見せず、文字列の変化を1分に1度に抑えて IPC を節約する。
+// 残りミリ秒を分粒度の「X日とY時間」「X時間Y分」「X分」へ整形する。下位の桁が0のときは「X日」「X時間」と単段へ畳む。ツールチップは秒まで見せず、文字列の変化を1分に1度に抑えて IPC を節約する。
 function coarseRemaining(ms)
 {
 	if (ms <= 0)
@@ -710,10 +713,10 @@ function coarseRemaining(ms)
 	const h = Math.floor((totalMin % 1440) / 60);
 	const m = totalMin % 60;
 	if (d > 0)
-		return t("duration.dayHour", { d, h });
+		return h > 0 ? t("duration.dayHour", { d, h }) : t("duration.day", { d });
 
 	if (h > 0)
-		return t("duration.hourMin", { h, m });
+		return m > 0 ? t("duration.hourMin", { h, m }) : t("duration.hour", { h });
 
 	return t("duration.min", { m });
 }
@@ -1635,6 +1638,11 @@ window.addEventListener("DOMContentLoaded", () => {
 	});
 	listen("open-settings", () => {
 		showSettings();
+	});
+	// トレイメニューの図柄選択から届く合図。Rust 側が設定を保存済みのため、ここでは手元の設定値と設定画面のピッカー表示だけを合わせ、保存はし直さない。
+	listen("tray-style-changed", (event) => {
+		settings.tray_style = event.payload;
+		updateTrayCombo();
 	});
 	// macOS のアプリメニューの「更新」から届く合図。手動更新ボタンと同じ経路で利用枠を取り直す。
 	listen("trigger-refresh", () => {

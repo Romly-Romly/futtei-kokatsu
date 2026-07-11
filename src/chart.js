@@ -632,16 +632,16 @@ const AXIS_DATE_MIN_TICK_MS = 24 * 3600 * 1000;
 
 
 
-// リセットまでの隔たり(分)を「◯日と◯時間」「◯時間◯分」「◯分」へ整形する。早期枯渇の判定文「◯前に早期枯渇予定」の冒頭に使う。表示を簡潔に保つため粒度は2段までに留める。
+// リセットまでの隔たり(分)を「◯日と◯時間」「◯時間◯分」「◯分」へ整形する。下位の桁が0のときは「◯日」「◯時間」と単段へ畳む。早期枯渇の判定文「◯前に早期枯渇予定」の冒頭に使う。表示を簡潔に保つため粒度は2段までに留める。
 function formatGap(min) {
 	const d = Math.floor(min / 1440);
 	const h = Math.floor((min % 1440) / 60);
 	const m = min % 60;
 	if (d > 0) {
-		return t("duration.dayHour", { d, h });
+		return h > 0 ? t("duration.dayHour", { d, h }) : t("duration.day", { d });
 	}
 	if (h > 0) {
-		return t("duration.hourMin", { h, m });
+		return m > 0 ? t("duration.hourMin", { h, m }) : t("duration.hour", { h });
 	}
 	return t("duration.min", { m });
 }
