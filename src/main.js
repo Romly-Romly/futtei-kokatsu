@@ -35,9 +35,13 @@ const state = {
 };
 
 let statusEl;
+let statusMainEl;
+let statusCountEl;
 let errorEl;
-let refreshEl;
 let titlebarGaugeEl;
+
+// 状態行の件数部分の文言。幅が足りない時は表示から落とすため、DOM とは別に保持して復帰できるようにする。
+let statusCountText = "";
 let sessionChartEl;
 let sessionVerdictEl;
 let weekChartEl;
@@ -319,19 +323,24 @@ function renderStatus()
 	const shown = displayUsage();
 	if (state.phase === "loading" && !shown.at)
 	{
-		statusEl.textContent = t("status.loading");
+		statusMainEl.textContent = t("status.loading");
+		statusCountText = "";
 		statusEl.className = "status status-loading";
 	}
 	else if (shown.at)
 	{
-		statusEl.textContent = t("status.lastUpdated", { time: clock(shown.at), ago: relativeAgo(shown.at, new Date()), count: state.history.length });
+		statusMainEl.textContent = t("status.lastUpdated", { time: clock(shown.at), ago: relativeAgo(shown.at, new Date()) });
+		statusCountText = t("status.samples", { count: state.history.length });
 		statusEl.className = "status";
 	}
 	else
 	{
-		statusEl.textContent = t("history.empty");
+		statusMainEl.textContent = t("history.empty");
+		statusCountText = "";
 		statusEl.className = "status";
 	}
+
+	fitStatus();
 
 	if (state.error)
 	{
@@ -347,6 +356,24 @@ function renderStatus()
 
 
 
+// 状態行をタイトルバーの残り幅へ収める。件数は入り切る時だけ出し、入らなければ丸ごと落として最終更新を残す。
+// 「蓄積デー…」と語の途中で切れるより、二次的な情報である件数ごと消えた方が読める。まず件数を出した状態で溢れるかを測り、溢れる時だけ隠す。
+// 幅は文言(言語・相対時刻の長さ・桁数)と窓幅の双方で変わるため、固定の折り返し幅では決められない。毎秒の renderStatus と窓のリサイズから測り直す。
+function fitStatus()
+{
+	statusCountEl.textContent = statusCountText;
+	statusCountEl.hidden = !statusCountText;
+	if (!statusCountText)
+		return;
+
+	// 小数の丸めで 1px 程度の差が出ることがあるため、その範囲は溢れとみなさない。
+	if (statusEl.scrollWidth - statusEl.clientWidth > 1)
+		statusCountEl.hidden = true;
+}
+
+
+
+
 
 
 
@@ -357,8 +384,6 @@ function renderStatus()
 function render()
 {
 	renderStatus();
-
-	refreshEl.disabled = state.phase === "loading";
 
 	renderMeters();
 
@@ -435,8 +460,12 @@ async function updateTitlebarGauge()
 
 
 // get_usage を呼んで state を更新する。呼び出しの前後で必ず render() を通す。
+// 更新はメニュー・ショートカット・トレイなど複数の入口から呼ばれるため、取得中の再入は無視して多重取得を避ける。
 async function refresh()
 {
+	if (state.phase === "loading")
+		return;
+
 	state.phase = "loading";
 	state.error = null;
 	render();
@@ -879,6 +908,7 @@ function applyLanguage()
 	document.documentElement.lang = locale;
 	// 選択肢名は applyI18n が入れ替えるため、その後でピッカーの表示(選択中ボタンの名前と各帯)を取り直す。
 	updateHeatCombo();
+	updatePaletteSubmenu();
 	updateTrayCombo();
 }
 
@@ -1126,6 +1156,81 @@ function buildHeatCombo()
 
 
 
+// 右クリックメニューの配色フライアウトの選択肢を組み立てる。設定画面のコンボと同じ heatPaletteOptions() を出所とし、名前は data-i18n で言語切替に追従、帯は updatePaletteSubmenu が描く。文言は applyI18n が後から入れるため、選択肢の生成はその前に一度だけ行う。
+function buildPaletteSubmenu()
+{
+	const sub = document.querySelector("#palette-submenu");
+	if (!sub || sub.childElementCount > 0)
+		return;
+
+	for (const item of heatPaletteOptions())
+	{
+		const opt = document.createElement("button");
+		opt.type = "button";
+		opt.className = "ctx-palette";
+		opt.setAttribute("role", "menuitemradio");
+		opt.setAttribute("aria-checked", "false");
+		opt.dataset.value = item.value;
+		opt.tabIndex = -1;
+
+		const check = document.createElement("span");
+		check.className = "ctx-palette-check";
+		check.setAttribute("aria-hidden", "true");
+		check.innerHTML = "&#x2713;";
+
+		const name = document.createElement("span");
+		name.className = "ctx-palette-name";
+		name.dataset.i18n = item.i18n;
+
+		const swatch = document.createElement("span");
+		swatch.className = "ctx-palette-swatch";
+		swatch.setAttribute("aria-hidden", "true");
+
+		opt.appendChild(check);
+		opt.appendChild(name);
+		opt.appendChild(swatch);
+		sub.appendChild(opt);
+	}
+}
+
+
+
+
+// 配色フライアウトの見えを現在の設定へ合わせる。選択中の選択肢へチェックを立て、各選択肢の帯をパレットから描く。グレイスケールの帯は現テーマで解決されるため、テーマ切替時やメニューを開くたびに呼ぶ。名前は applyI18n が選択肢へ入れた文字を使うため、言語反映の後に呼ぶ。
+function updatePaletteSubmenu()
+{
+	const sub = document.querySelector("#palette-submenu");
+	if (!sub || !settings)
+		return;
+
+	const current = settings.heat_palette || "standard";
+	for (const opt of sub.querySelectorAll(".ctx-palette"))
+	{
+		const value = opt.dataset.value;
+		opt.setAttribute("aria-checked", value === current ? "true" : "false");
+		const swatch = opt.querySelector(".ctx-palette-swatch");
+		if (swatch)
+			swatch.style.background = heatGradientCss(value);
+	}
+}
+
+
+
+
+// 配色フライアウトで選ばれたパレットを適用する。設定値を書き換え、描画へ通し、設定画面のコンボとフライアウト自身の見えも合わせてから保存する。設定コンボから選んだ時と同じ結果になるよう、経路を揃える。
+function choosePalette(value)
+{
+	settings.heat_palette = value;
+	setHeatPalette(value);
+	updateHeatCombo();
+	updatePaletteSubmenu();
+	render();
+	saveSettings();
+}
+
+
+
+
 
 
 
@@ -1199,10 +1304,9 @@ function setShowTrend(on)
 
 
 
-// 設定ビューのコントロールを配線する。歯車ボタンと戻るボタンでビューを切り替え、各コントロールは設定値を書き換えて保存し、即時の反映が要るもの(言語・消費傾向・日付形式)はその場で画面へ通す。
+// 設定ビューのコントロールを配線する。設定画面へは右クリックメニュー・ショートカット・トレイから入り、戻るボタンでメインへ戻る。各コントロールは設定値を書き換えて保存し、即時の反映が要るもの(言語・消費傾向・日付形式)はその場で画面へ通す。
 function wireSettings()
 {
-	document.querySelector("#open-settings").addEventListener("click", showSettings);
 	document.querySelector("#settings-back").addEventListener("click", showMain);
 
 	bindSegmented("#theme-seg", (value) => {
@@ -1393,6 +1497,7 @@ function wireContextMenu()
 		return;
 
 	applyMenuShortcutLabels();
+	buildPaletteSubmenu();
 
 	const items = () => Array.from(menu.querySelectorAll(".ctx-item"));
 
@@ -1402,9 +1507,56 @@ function wireContextMenu()
 			list[i].focus();
 	};
 
+	// 配色フライアウトの要素。フライアウトは親項目(.ctx-sub 内)の脇へ絶対配置で開く。
+	const sub = menu.querySelector("#palette-submenu");
+	const paletteItem = menu.querySelector('[data-action="palette"]');
+	const subWrap = paletteItem ? paletteItem.closest(".ctx-sub") : null;
+	const subOptions = () => (sub ? Array.from(sub.querySelectorAll(".ctx-palette")) : []);
+
+	const closeSub = (focusParent) => {
+		if (!sub || sub.hidden)
+			return;
+		sub.hidden = true;
+		sub.classList.remove("flip-left");
+		if (paletteItem)
+			paletteItem.setAttribute("aria-expanded", "false");
+		if (focusParent && paletteItem)
+			paletteItem.focus();
+	};
+
+	const openSub = () => {
+		if (!sub || !paletteItem)
+			return;
+		// 選択中の配色と各帯を今の設定・テーマへ合わせてから開く。
+		updatePaletteSubmenu();
+		sub.classList.remove("flip-left");
+		sub.style.top = "-5px";
+		sub.hidden = false;
+		paletteItem.setAttribute("aria-expanded", "true");
+		// 表示してから寸法を測り、右がはみ出すなら左脇へ回し、下がはみ出す分だけ上へ寄せる。
+		const margin = 6;
+		const itemRect = paletteItem.getBoundingClientRect();
+		const subRect = sub.getBoundingClientRect();
+		if (itemRect.right + subRect.width + margin > window.innerWidth)
+			sub.classList.add("flip-left");
+		const overflowY = subRect.bottom + margin - window.innerHeight;
+		if (overflowY > 0)
+			sub.style.top = `${-5 - overflowY}px`;
+	};
+
+	// フライアウト内へ焦点を移す。選択中の配色があればそこへ、無ければ先頭へ移す。
+	const focusSubOption = () => {
+		const opts = subOptions();
+		if (opts.length === 0)
+			return;
+		const checked = opts.find((o) => o.getAttribute("aria-checked") === "true");
+		(checked || opts[0]).focus();
+	};
+
 	const closeMenu = () => {
 		if (menu.hidden)
 			return;
+		closeSub(false);
 		menu.hidden = true;
 	};
 
@@ -1413,6 +1565,9 @@ function wireContextMenu()
 		const trendItem = menu.querySelector('[data-action="trend"]');
 		if (trendItem)
 			trendItem.setAttribute("aria-checked", settings && settings.show_trend ? "true" : "false");
+		// 前回の残りが無いようフライアウトは畳んだ状態で開き、選択中の配色と帯を今の設定へ合わせる。
+		closeSub(false);
+		updatePaletteSubmenu();
 
 		// クリック位置へ置いてから表示し、寸法を測ってビューポートからはみ出す分だけ内側へ寄せる。先に位置を当てることで、旧位置での一瞬のちらつきを避ける。
 		const margin = 6;
@@ -1439,14 +1594,78 @@ function wireContextMenu()
 		openMenuAt(event.clientX, event.clientY);
 	});
 
-	// 項目を選んだらメニューを閉じて対応する動作を起こす。
+	// 項目を選んだらメニューを閉じて対応する動作を起こす。配色フライアウトの選択肢はメニュー全体を閉じて配色を適用し、配色の親項目はメニューを閉じずにフライアウトの開閉を切り替える。
 	menu.addEventListener("click", (event) => {
+		const paletteOpt = event.target.closest(".ctx-palette");
+		if (paletteOpt && sub && sub.contains(paletteOpt))
+		{
+			closeMenu();
+			choosePalette(paletteOpt.dataset.value);
+			return;
+		}
 		const item = event.target.closest(".ctx-item");
 		if (!item || !menu.contains(item))
 			return;
+		if (item === paletteItem)
+		{
+			if (sub && sub.hidden)
+			{
+				openSub();
+				focusSubOption();
+			}
+			else
+			{
+				closeSub(true);
+			}
+			return;
+		}
 		closeMenu();
 		runMenuAction(item.dataset.action);
 	});
+
+	// カーソルを親項目へ合わせるとフライアウトを開き、包み(親項目とフライアウト)から外れると閉じる。フライアウトは包みの子のため、親項目からフライアウトへ移る間に閉じることはない。
+	if (paletteItem && subWrap)
+	{
+		paletteItem.addEventListener("mouseenter", openSub);
+		subWrap.addEventListener("mouseleave", () => closeSub(false));
+		// 親項目で右キーを押すとフライアウトへ入る。上下での項目移動(menu の keydown)へ渡さないよう、ここで奪う。
+		paletteItem.addEventListener("keydown", (event) => {
+			if (event.key === "ArrowRight")
+			{
+				event.preventDefault();
+				event.stopPropagation();
+				openSub();
+				focusSubOption();
+			}
+		});
+	}
+
+	// フライアウト内のキーボード操作。上下で選択肢を辿り、左キー・Esc で親項目へ戻る。ここで拾ったキーは menu の keydown へ渡さない。Enter/Space は選択肢(button)の既定動作(click)へ任せる。
+	if (sub)
+	{
+		sub.addEventListener("keydown", (event) => {
+			const opts = subOptions();
+			const at = opts.indexOf(document.activeElement);
+			if (event.key === "Escape" || event.key === "ArrowLeft")
+			{
+				event.preventDefault();
+				event.stopPropagation();
+				closeSub(true);
+			}
+			else if (event.key === "ArrowDown")
+			{
+				event.preventDefault();
+				event.stopPropagation();
+				(opts[at < 0 ? 0 : Math.min(opts.length - 1, at + 1)] || opts[0]).focus();
+			}
+			else if (event.key === "ArrowUp")
+			{
+				event.preventDefault();
+				event.stopPropagation();
+				(opts[at < 0 ? opts.length - 1 : Math.max(0, at - 1)] || opts[opts.length - 1]).focus();
+			}
+		});
+	}
 
 	// メニュー外の押下で閉じる。押下時点で判定することで、項目クリックの流れ(押下はメニュー内)を邪魔しない。
 	document.addEventListener("mousedown", (event) => {
@@ -1539,7 +1758,7 @@ async function applyAccentColor()
 	let hex;
 	try
 	{
-		hex = await invoke("get_accent_color");
+		hex = await invoke("accent_color");
 	}
 	catch
 	{
@@ -1610,8 +1829,9 @@ window.addEventListener("DOMContentLoaded", () => {
 	applyAppVersion();
 
 	statusEl = document.querySelector("#status");
+	statusMainEl = document.querySelector("#status-main");
+	statusCountEl = document.querySelector("#status-count");
 	errorEl = document.querySelector("#error");
-	refreshEl = document.querySelector("#refresh");
 	titlebarGaugeEl = document.querySelector("#titlebar-gauge");
 	sessionChartEl = document.querySelector("#session-chart");
 	sessionVerdictEl = document.querySelector("#session-verdict");
@@ -1632,7 +1852,6 @@ window.addEventListener("DOMContentLoaded", () => {
 	wireSettings();
 	initSettings();
 
-	refreshEl.addEventListener("click", refresh);
 	listen("usage-updated", (event) => {
 		applyUsage(event.payload);
 	});
@@ -1680,6 +1899,7 @@ window.addEventListener("DOMContentLoaded", () => {
 		window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
 			render();
 			updateHeatCombo();
+			updatePaletteSubmenu();
 		});
 	}
 	// チャートのマウント寸法の変化に追随してバーンダウンを描き直し、viewBox の寸法を新しい横幅・高さへ合わせる。ResizeObserver は窓のリサイズに限らず、消費傾向の表示切り替えや段組みの変化などレイアウト由来の寸法変化も拾う。連続する通知は次の描画フレームまで畳み、観測ループの警告も避ける。ヒートマップは CSS グリッドが寸法へ自動追従するため対象外。
@@ -1696,6 +1916,8 @@ window.addEventListener("DOMContentLoaded", () => {
 	});
 	chartResizeObserver.observe(sessionChartEl);
 	chartResizeObserver.observe(weekChartEl);
+	// 窓幅が変わるとタイトルバーの残り幅も変わるため、状態行の件数を出せるかどうかを測り直す。
+	window.addEventListener("resize", fitStatus);
 	setInterval(() => {
 		renderMeters();
 		renderStatus();

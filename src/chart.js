@@ -1042,7 +1042,7 @@ function dayLabels() {
 // 連続サンプルの間隔がこれを超えたら、アプリ休止などによる飛びとみなし集計から外す。1サンプルの Δ% を1つの時間帯へ帰属させる前提が崩れるため。
 const HEAT_MAX_GAP_MS = 30 * 60 * 1000;
 
-// 消費強度のカラーランプ群。名前から RGB stop 列を引く。UI のテーマ追従色ではなくデータの強度を表す色なので、standard・parula・turbo は Light/Dark に依らず固定する。standard は teal→amber→red、parula と turbo は MATLAB のカラーマップを少数のアンカーで近似したもの。グレイスケールは resolveHeatStops でテーマに応じて作るためここには持たない。
+// 消費強度のカラーランプ群。名前から RGB stop 列を引く。UI のテーマ追従色ではなくデータの強度を表す色なので、Light/Dark に依らず固定する。standard は teal→amber→red、parula と turbo は MATLAB のカラーマップを少数のアンカーで近似したもの。グレイスケールと github は本家 GitHub 同様テーマで濃淡が変わるため、resolveHeatStops でテーマに応じて作りここには持たない。
 const HEAT_PALETTES = {
 	standard: [[31, 58, 74], [47, 110, 106], [202, 166, 74], [194, 90, 58], [255, 90, 90]],
 	parula: [[53, 42, 135], [18, 124, 215], [42, 170, 144], [152, 190, 74], [249, 246, 30]],
@@ -1057,7 +1057,7 @@ let heatPalette = "standard";
 
 // 消費強度ヒートマップのパレットを切り替える。以後の描画がこの設定に従う。未知の名前は standard へ丸める。
 export function setHeatPalette(name) {
-	heatPalette = (HEAT_PALETTES[name] || name === "gray") ? name : "standard";
+	heatPalette = (HEAT_PALETTES[name] || name === "gray" || name === "github") ? name : "standard";
 }
 
 
@@ -1072,6 +1072,7 @@ export function heatPaletteOptions() {
 		{ value: "viridis", i18n: "settings.heat.viridis" },
 		{ value: "plasma", i18n: "settings.heat.plasma" },
 		{ value: "inferno", i18n: "settings.heat.inferno" },
+		{ value: "github", i18n: "settings.heat.github" },
 		{ value: "gray", i18n: "settings.heat.gray" },
 	];
 }
@@ -1088,11 +1089,16 @@ export function heatGradientCss(name) {
 
 
 
-// 指定パレット(既定は現在選択中)の stop 列を返す。グレイスケールはカード地との明暗差を保つため、解決済みテーマ(prefers-color-scheme)で濃淡の向きを変える。暗いテーマでは消費が多いほど明るく、明るいテーマでは多いほど暗くする。
+// 指定パレット(既定は現在選択中)の stop 列を返す。グレイスケールと github はテーマ(prefers-color-scheme)で色が変わる。グレイスケールはカード地との明暗差を保つため濃淡の向きを反転し、暗いテーマでは消費が多いほど明るく、明るいテーマでは多いほど暗くする。github は本家 GitHub のコントリビューショングラフに倣い、ライトでは薄緑→濃緑、ダークでは暗緑→明緑の各テーマ用の緑段を返す。
 function resolveHeatStops(name = heatPalette) {
+	const dark = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
 	if (name === "gray") {
-		const dark = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
 		return dark ? [[70, 70, 70], [236, 236, 236]] : [[212, 212, 212], [38, 38, 38]];
+	}
+	if (name === "github") {
+		return dark
+			? [[22, 27, 34], [14, 68, 41], [0, 109, 50], [38, 166, 65], [57, 211, 83]]
+			: [[235, 237, 240], [155, 233, 168], [64, 196, 99], [48, 161, 78], [33, 110, 57]];
 	}
 	return HEAT_PALETTES[name] || HEAT_PALETTES.standard;
 }

@@ -2,6 +2,12 @@
 
 > 🌐 **[日本語 →](CHANGELOG.ja.md)**
 
+## [1.2.0] - 2026-07-18
+
+- Moved the last-updated time and accumulated data count to the title bar, and removed the buttons that were in the header.
+- Made the consumption-trend heatmap palette switchable on the spot from the right-click menu.
+- Added a "GitHub-style" palette to the consumption-trend heatmap.
+
 ## [1.1.1] - 2026-07-11
 
 - Made the tray icon chart (session burndown, weekly burndown, or pie chart) selectable from the tray's right-click menu as well.

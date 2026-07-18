@@ -16,6 +16,8 @@
 				<canvas id="titlebar-gauge" class="titlebar-gauge" width="0" height="0" aria-hidden="true" hidden></canvas>
 				<span class="titlebar-title" data-i18n="app.name">払底枯渇</span>
 				<span class="titlebar-version" id="titlebar-version" aria-hidden="true"></span>
+				<!-- 状態行。幅が足りない時に件数だけを丸ごと落とせるよう、最終更新と件数を別々の span に分ける。 -->
+				<span class="status" id="status"><span id="status-main"></span><span class="status-count" id="status-count"></span></span>
 			</div>
 			<div class="titlebar-controls">
 				<button type="button" class="tb-btn" id="tb-min" aria-label="最小化" title="最小化" data-i18n-aria-label="titlebar.minimize" data-i18n-title="titlebar.minimize"><span class="tb-ico" aria-hidden="true">&#xE921;</span></button>
@@ -25,13 +27,6 @@
 		</div>
 		<div class="window-body">
 			<main class="app" id="view-main">
-				<header class="app-header">
-					<p id="status" class="status"></p>
-					<button id="refresh" type="button" data-i18n="main.refresh">更新</button>
-					<button id="open-settings" class="icon-btn" type="button" aria-label="設定" title="設定" data-i18n-aria-label="main.settings" data-i18n-title="main.settings">
-						<span class="ico" aria-hidden="true">&#xE008;</span>
-					</button>
-				</header>
 				<p id="error" class="error-banner" hidden></p>
 				<section class="panels">
 					<figure id="panel-session" class="panel">
@@ -223,6 +218,14 @@
 				<span class="ctx-check-mark" aria-hidden="true">&#x2713;</span>
 				<span data-i18n="menu.trend">消費傾向を表示</span>
 			</button>
+			<!-- 消費傾向ヒートマップの配色をその場で選べるフライアウト。親項目にカーソルを合わせる(または右キー)と横に開く。選択肢は main.js が heatPaletteOptions() から生成し、名前は applyI18n が、帯は updatePaletteSubmenu が描く。 -->
+			<div class="ctx-sub" role="none">
+				<button type="button" class="ctx-item ctx-has-sub" role="menuitem" data-action="palette" aria-haspopup="true" aria-expanded="false">
+					<span data-i18n="menu.palette">消費傾向の配色</span>
+					<span class="ctx-sub-arrow" aria-hidden="true">&#x25B8;</span>
+				</button>
+				<div class="ctx-submenu" id="palette-submenu" role="menu" hidden></div>
+			</div>
 			<div class="ctx-sep" role="separator"></div>
 			<button type="button" class="ctx-item" role="menuitem" data-action="close">
 				<span data-i18n="menu.close">ウィンドウを閉じる</span>

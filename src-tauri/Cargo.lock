@@ -1063,10 +1063,11 @@ dependencies = [
 
 [[package]]
 name = "futtei-kokatsu"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "regex",
+ "romly-tauri-common",
  "serde",
  "serde_json",
  "tauri",
@@ -2741,6 +2742,16 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+]
+
+[[package]]
+name = "romly-tauri-common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 [package]
 name = "futtei-kokatsu"
-version = "1.1.1"
+version = "1.2.0"
 description = "Claude の利用量（週次・セッションの消費率）を見張る常駐ツール"
 authors = ["Romly"]
 license = "GPL-3.0-only"
@@ -27,9 +27,12 @@ tiny-skia = "0.11"
 # トレイのバーンダウン描画で、claude が返すリセット時刻の壁時計表記(現地時間)を絶対時刻へ解釈するために使う。壁時計の年月日時分から現地タイムゾーンでの Unix 時刻を得るには現地オフセットの解決が要り、これを clock フィーチャの Local が担う。
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
-# トレイの小アイコン寸法を現在の DPI から測り、Mica を使える Windows 11 かをビルド番号で見分け、OS のアクセント色をレジストリから読むために Win32 を直接呼ぶ。tray-icon が使う版に合わせて windows-sys のバージョン重複を避ける。
+# ウィンドウ配置の永続化、システムバックドロップとアクセント色、自作タイトルバーのウィンドウ操作を担う共通クレート。正本は別リポジトリにあり、ここへは git subtree で内包している。ビルド番号の判定とアクセント色のレジストリ読みもこのクレートが引き受ける。
+romly-tauri-common = { path = "External/romly-tauri-common" }
+
+# トレイの小アイコン寸法を現在の DPI から測るために Win32 を直接呼ぶ。tray-icon が使う版に合わせて windows-sys のバージョン重複を避ける。
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_System_Registry", "Wdk_System_SystemServices"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi"] }
 
 # macOS では透過ウィンドウ(transparent: true)の実現に private API が要るため、macos-private-api フィーチャを macOS 標的にのみ足す。Windows のビルドには含めない。tauri.macos.conf.json の app.macOSPrivateApi と対で機能する。
 [target.'cfg(target_os = "macos")'.dependencies]

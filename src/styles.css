@@ -1,12 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Copyright (C) 2026 Romly */
 
-/* 設定アイコンに使う自作グリフのフォント。 */
-@font-face {
-	font-family: "romoji";
-	src: url("../assets/romoji.ttf") format("truetype");
-}
-
 :root {
 	/* UI フォントは system-ui を主軸に OS の既定 UI フォント(Windows は Segoe UI、macOS は San Francisco)へ追従させる。総称名なので、相手 OS のフォントが入っていても名前の一致で別 OS のフォントへ化けることがない。和字は system-ui に含まれないためグリフ単位のフォールバックで補い、Windows は Yu Gothic UI、macOS は Hiragino Sans が当たる。この2つは OS 間で実体が重ならないので、列挙順に関わらず各 OS の和文フォントだけが選ばれる。 */
 	font-family: system-ui, "Yu Gothic UI", "Hiragino Sans", sans-serif;
@@ -96,7 +90,9 @@ body {
 	margin-right: 8px;
 }
 
+/* タイトルバーのアプリ名。窓を狭めた時は右端の状態行が先に詰まるよう、こちらは縮めない(flex-shrink:0)。状態行を追い出しても幅が足りないところまで狭まった時だけ、ここも省略記号で詰まる。 */
 .titlebar-title {
+	flex-shrink: 0;
 	font-size: 0.72rem;
 	font-weight: 500;
 	color: #3a3a3a;
@@ -105,7 +101,7 @@ body {
 	text-overflow: ellipsis;
 }
 
-/* タイトルバーのアプリ名の右へ添えるバージョン。名前より一段淡い色と小さい字で控えめに見せ、名前が縮むより先にこちらは詰めない(flex-shrink:0)。 */
+/* タイトルバーのアプリ名の右へ添えるバージョン。名前より一段淡い色と小さい字で控えめに見せ、名前と同じく詰めない(flex-shrink:0)。 */
 .titlebar-version {
 	flex-shrink: 0;
 	margin-left: 6px;
@@ -216,30 +212,6 @@ body {
 	display: flex;
 	flex-direction: column;
 	gap: 16px;
-}
-
-.app-header {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-}
-
-/* ヘッダの設定ボタン。本文ボタンと同じ装いでアイコンを1つ収める。 */
-.icon-btn {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	padding: 0.35em 0.5em;
-	line-height: 0;
-}
-
-/* romoji フォントのグリフを1文字収めるアイコン。 */
-.ico {
-	font-family: "romoji";
-	font-style: normal;
-	font-weight: normal;
-	line-height: 1;
-	font-size: 18px;
 }
 
 /* 設定ビュー。メインの内容を設定画面へ切り替えて見せる。中央寄せと余白はメイン画面に合わせる。 */
@@ -519,6 +491,99 @@ body {
 	background-color: rgba(0, 0, 0, 0.1);
 }
 
+/* 配色フライアウトを持つ項目の包み。フライアウトを親項目の脇へ絶対配置するための位置基準。 */
+.ctx-sub {
+	position: relative;
+}
+
+/* 親項目の右端へ添える、サブメニューが開くことを示す三角。ショートカット表記と同じく margin-left:auto で右へ寄せ、控えめな色にする。 */
+.ctx-sub-arrow {
+	margin-left: auto;
+	padding-left: 24px;
+	font-size: 0.7rem;
+	color: #8a8a8a;
+}
+
+/* 配色を選ぶフライアウト。親項目の右脇へ隙間なく接して開き、地・枠・影はメインのメニューへ揃える。右がはみ出す時は main.js が .flip-left を付けて左脇へ回す。 */
+.ctx-submenu {
+	position: absolute;
+	left: 100%;
+	top: -5px;
+	z-index: 1001;
+	min-width: 172px;
+	margin: 0;
+	padding: 4px;
+	border: 1px solid rgba(0, 0, 0, 0.12);
+	border-radius: 8px;
+	background-color: rgba(255, 255, 255, 0.92);
+	-webkit-backdrop-filter: blur(24px) saturate(180%);
+	backdrop-filter: blur(24px) saturate(180%);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.ctx-submenu[hidden] {
+	display: none;
+}
+
+.ctx-submenu.flip-left {
+	left: auto;
+	right: 100%;
+}
+
+/* フライアウト内の配色1件。名前を左、帯を右へ並べ、選択中は左の余白へチェックを出す。文字の始まりはチェックの有無に依らず一定に保つ。 */
+.ctx-palette {
+	appearance: none;
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+	padding: 6px 12px 6px 30px;
+	border: none;
+	border-radius: 6px;
+	background-color: transparent;
+	color: #0f0f0f;
+	font-family: inherit;
+	font-size: 0.8rem;
+	font-weight: 400;
+	text-align: left;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.ctx-palette:hover,
+.ctx-palette:focus-visible {
+	background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+	outline: none;
+}
+
+.ctx-palette-name {
+	flex: 1 1 auto;
+}
+
+.ctx-palette-swatch {
+	flex: 0 0 auto;
+	width: 56px;
+	height: 12px;
+	border-radius: 3px;
+	/* 帯の端色がメニュー地と近いテーマで輪郭が消えないよう、内側へ細い枠を重ねる。 */
+	box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+/* チェック記号は左の余白へ絶対配置で置き、選択中のときだけ見せる。 */
+.ctx-palette-check {
+	position: absolute;
+	left: 10px;
+	top: 50%;
+	transform: translateY(-50%);
+	color: var(--accent);
+	visibility: hidden;
+}
+
+.ctx-palette[aria-checked="true"] .ctx-palette-check {
+	visibility: visible;
+}
+
 /* オン・オフのトグルスイッチ。 */
 .switch {
 	position: relative;
@@ -594,13 +659,21 @@ button:disabled {
 	opacity: 0.5;
 }
 
+/* タイトルバー右端の状態行。ドラッグ領域の末尾へ auto マージンで寄せ、キャプションボタンの直左に置く。ビューを問わず常に出るため、設定画面でも最終更新が見える。窓が狭い時に詰まるのはアプリ名ではなくこちらで、まず件数(.status-count)を丸ごと落とし、それでも入らなければ省略記号にする(落とす判断は fitStatus が幅を測って行う)。 */
 .status {
-	margin: 0;
-	min-height: 1.2em;
-	flex: 1;
-	text-align: right;
-	font-size: 0.85rem;
+	margin: 0 0 0 auto;
+	padding: 0 12px;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	font-size: 0.72rem;
 	color: #6b6b6b;
+}
+
+/* 状態行の件数。最終更新との間を空ける。 */
+.status-count {
+	margin-left: 0.6em;
 }
 
 .error-banner {
@@ -1072,7 +1145,8 @@ button:disabled {
 		color: #f6f6f6;
 	}
 
-	.ctx-shortcut {
+	.ctx-shortcut,
+	.ctx-sub-arrow {
 		color: #9a9a9a;
 	}
 
@@ -1080,7 +1154,18 @@ button:disabled {
 		background-color: rgba(255, 255, 255, 0.14);
 	}
 
-	.combo-swatch {
+	.ctx-submenu {
+		background-color: rgba(40, 40, 40, 0.92);
+		border-color: rgba(255, 255, 255, 0.12);
+		box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+	}
+
+	.ctx-palette {
+		color: #f6f6f6;
+	}
+
+	.combo-swatch,
+	.ctx-palette-swatch {
 		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
 	}
 
