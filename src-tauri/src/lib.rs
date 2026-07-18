@@ -1686,7 +1686,7 @@ fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
 		"app_update" => trigger_refresh(app),
 		// トレイの終了と同じく、終了前に現在のウィンドウ配置を保存してから抜ける。
 		"app_quit" => {
-			save_window_state(app);
+			romly_tauri_common::window_state::save(app);
 			app.exit(0);
 		}
 		_ => {}

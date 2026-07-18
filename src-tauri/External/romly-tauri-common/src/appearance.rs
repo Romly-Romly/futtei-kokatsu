@@ -5,6 +5,7 @@ use tauri::{AppHandle, Manager, Runtime};
 use crate::MAIN_WINDOW_LABEL;
 
 /// Mica を使える最小の Windows ビルド番号。Mica は Windows 11 以降でのみ利用できる。
+#[cfg(windows)]
 const MICA_MIN_BUILD: u32 = 22000;
 
 
