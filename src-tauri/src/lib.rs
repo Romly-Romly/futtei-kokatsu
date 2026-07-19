@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Romly
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,48 +29,41 @@ const BLUR_HIDE_GRACE: Duration = Duration::from_millis(150);
 // トレイアイコンを生成後に取り出して操作するための固定 id。ツールチップ更新コマンドが tray_by_id で参照する。
 const TRAY_ID: &str = "main-tray";
 
-// /usage の各メーター行から消費%とリセット時刻文字列を取り出す正規表現。中点はU+00B7。
-static RE_SESSION: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"Current session:\s*(\d+)% used(?:\s*·\s*resets\s*(.+))?").unwrap()
+// トレイアイコン・ウィンドウアイコンの描画対象にする利用枠のキー。meter_key がラベルから導出するキーと同じ表記で持つ。
+const METER_SESSION: &str = "session";
+const METER_WEEK_ALL: &str = "week_all";
+const METER_WEEK_FABLE: &str = "week_fable";
+
+// /usage のメーター行を照合する正規表現。行頭が "Current" の行だけを対象に、ラベル・消費%・任意のリセット時刻文字列を取り出す。中点はU+00B7。末尾の分析ブロックにも%を含む行はあるが、"Current ...:" の形を取らないためここには掛からない。
+static RE_METER_LINE: LazyLock<Regex> = LazyLock::new(|| {
+	Regex::new(r"^Current\s+([^:]+):\s*(\d+)% used(?:\s*·\s*resets\s*(.+))?$").unwrap()
 });
 
-// 週次枠(全モデル)のメーター行を照合する。
-static RE_WEEK_ALL: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"Current week \(all models\):\s*(\d+)% used(?:\s*·\s*resets\s*(.+))?").unwrap()
-});
-
-// 週次枠(Sonnet のみ)のメーター行を照合する。この枠は reset 表記を伴わない。
-static RE_WEEK_SONNET: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"Current week \(Sonnet only\):\s*(\d+)% used").unwrap()
-});
-
-// 1つの利用枠メーター。resets は Sonnet 専用枠のように省略される場合があるため Option とする。
+// 1つの利用枠メーター。resets は省略される場合があるため Option とする。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meter {
 	pub used_pct: u8,
 	pub resets: Option<String>,
 }
 
-// /usage が返す3メーターをまとめた結果。raw は表示・診断のため整形前テキストを保持する。
+// /usage が返すメーター一式をまとめた結果。meters はラベル由来のキー(session・week_all・week_fable 等)で引く。labels はキーごとの応答上のラベル文字列で、フロントが辞書に無い枠を表示するときの名前に使う。raw は表示・診断のため整形前テキストを保持する。
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
-	pub session: Option<Meter>,
-	pub week_all: Option<Meter>,
-	pub week_sonnet: Option<Meter>,
+	pub meters: BTreeMap<String, Meter>,
+	pub labels: BTreeMap<String, String>,
 	pub raw: String,
 }
 
-// 1時点の測定結果。時系列として履歴ファイルへ1行ずつ蓄積する。嵩む raw は保存しない。
+// 1時点の測定結果。時系列として履歴ファイルへ1行ずつ蓄積する。嵩む raw は保存しない。メーターは serde(flatten) で ts と同じ階層へ並べ、各行を {"ts":…,"session":{…},"week_all":{…},…} の平坦な JSON にする。枠の増減があってもこの形のまま蓄積でき、値が null の枠を含む行も読める。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Sample {
 	ts: u64,
-	session: Option<Meter>,
-	week_all: Option<Meter>,
-	week_sonnet: Option<Meter>,
+	#[serde(flatten)]
+	meters: BTreeMap<String, Option<Meter>>,
 }
 
 
-// 設定ウィンドウで操作する永続設定。theme と language は将来の全面ローカライズも見据えて文字列で持つ。show_trend は消費傾向ヒートマップの表示有無、date_format は日付の表示形式、heat_palette は消費傾向ヒートマップの配色(standard/parula/turbo/gray)。tray_style はトレイ(メニューバー)アイコンの図柄で "burndown-session"(セッション枠の簡易バーンダウン)・"burndown-week"(週次枠の簡易バーンダウン)・"gauge"(リング＋扇形のゲージ)のいずれか。hide_on_blur はウィンドウがフォーカスを失った時に自動でトレイへ隠すか。serde(default) を付け、項目が増えても古い設定ファイルが読めるようにする。
+// 設定ウィンドウで操作する永続設定。theme と language は将来の全面ローカライズも見据えて文字列で持つ。show_trend は消費傾向ヒートマップの表示有無、date_format は日付の表示形式、heat_palette は消費傾向ヒートマップの配色(standard/parula/turbo/gray)。tray_style はトレイ(メニューバー)アイコンの図柄で "burndown-session"(セッション枠の簡易バーンダウン)・"burndown-week"(週次全モデル枠の簡易バーンダウン)・"burndown-week-fable"(週次 Fable 枠の簡易バーンダウン)・"gauge"(リング＋扇形のゲージ)のいずれか。hide_on_blur はウィンドウがフォーカスを失った時に自動でトレイへ隠すか。serde(default) を付け、項目が増えても古い設定ファイルが読めるようにする。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
@@ -195,12 +189,28 @@ fn fetch_usage_text() -> Result<String, String> {
 
 
 
-// 1メーター分を正規表現で照合し、消費%とリセット時刻文字列を取り出す。
-fn parse_meter(re: &Regex, text: &str) -> Option<Meter> {
-	let caps = re.captures(text)?;
-	let used_pct = caps.get(1)?.as_str().parse().ok()?;
-	let resets = caps.get(2).map(|m| m.as_str().trim().to_string());
-	Some(Meter { used_pct, resets })
+// メーター行のラベルから履歴・表示のキーを導出する。括弧の前の最初の語を主部、括弧内の最初の語を修飾部とし、それぞれ小文字の英数字へ正規化して "主部_修飾部" と繋ぐ。"session" → "session"、"week (all models)" → "week_all"、"week (Sonnet only)" → "week_sonnet"、"week (Fable)" → "week_fable" となり、未知のラベルも同じ規則で機械的にキー化される。正規化で主部が空になるラベルは空文字列を返し、呼び出し側で読み飛ばす。
+fn meter_key(label: &str) -> String {
+	let (base, qual) = match label.split_once('(') {
+		Some((b, q)) => (b, q.split(')').next().unwrap_or("")),
+		None => (label, ""),
+	};
+	let norm = |s: &str| -> String {
+		s.split_whitespace()
+			.next()
+			.unwrap_or("")
+			.chars()
+			.filter(|c| c.is_ascii_alphanumeric())
+			.map(|c| c.to_ascii_lowercase())
+			.collect()
+	};
+	let base = norm(base);
+	let qual = norm(qual);
+	if base.is_empty() || qual.is_empty() {
+		base
+	} else {
+		format!("{}_{}", base, qual)
+	}
 }
 
 
@@ -212,14 +222,29 @@ fn parse_meter(re: &Regex, text: &str) -> Option<Meter> {
 
 
 
-// /usage の整形テキストから3メーターを抽出する。
+// /usage の整形テキストから利用枠メーターを抽出する。各行を RE_METER_LINE で照合し、ラベル由来のキーで meters と labels へ集める。応答に無い枠は単に現れないだけなので、枠が増減してもここは変わらない。
 fn parse_usage(text: &str) -> Usage {
-	Usage {
-		session: parse_meter(&RE_SESSION, text),
-		week_all: parse_meter(&RE_WEEK_ALL, text),
-		week_sonnet: parse_meter(&RE_WEEK_SONNET, text),
-		raw: text.to_string(),
+	let mut meters = BTreeMap::new();
+	let mut labels = BTreeMap::new();
+	for line in text.lines() {
+		let caps = match RE_METER_LINE.captures(line.trim()) {
+			Some(c) => c,
+			None => continue,
+		};
+		let label = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+		let key = meter_key(label);
+		if key.is_empty() {
+			continue;
+		}
+		let used_pct = match caps.get(2).and_then(|m| m.as_str().parse().ok()) {
+			Some(v) => v,
+			None => continue,
+		};
+		let resets = caps.get(3).map(|m| m.as_str().trim().to_string());
+		labels.insert(key.clone(), label.to_string());
+		meters.insert(key, Meter { used_pct, resets });
 	}
+	Usage { meters, labels, raw: text.to_string() }
 }
 
 
@@ -252,11 +277,11 @@ fn excerpt(text: &str) -> String {
 
 
 
-// claude から利用枠を取得し3メーターへ分解する。表示と履歴蓄積の双方がこの経路を通る。1枠も読み取れなかったときは応答の冒頭を添えてエラーとし、原因を追える形にするとともに空サンプルの蓄積を防ぐ。
+// claude から利用枠を取得しメーター一式へ分解する。表示と履歴蓄積の双方がこの経路を通る。1枠も読み取れなかったときは応答の冒頭を添えてエラーとし、原因を追える形にするとともに空サンプルの蓄積を防ぐ。
 fn fetch_usage() -> Result<Usage, String> {
 	let text = fetch_usage_text()?;
 	let usage = parse_usage(&text);
-	if usage.session.is_none() && usage.week_all.is_none() && usage.week_sonnet.is_none() {
+	if usage.meters.is_empty() {
 		return Err(format!(
 			"claude の応答から利用枠を読み取れませんでした。応答冒頭: {}",
 			excerpt(&usage.raw)
@@ -333,13 +358,11 @@ fn append_sample_to(path: &Path, sample: &Sample) -> Result<(), String> {
 
 
 
-// 取得した利用枠を現在時刻付きのサンプルにして履歴へ追記する。
+// 取得した利用枠を現在時刻付きのサンプルにして履歴へ追記する。応答に現れた枠だけを書き、無い枠のキーは行へ含めない。
 fn append_sample(app: &tauri::AppHandle, usage: &Usage) -> Result<(), String> {
 	let sample = Sample {
 		ts: now_ms(),
-		session: usage.session.clone(),
-		week_all: usage.week_all.clone(),
-		week_sonnet: usage.week_sonnet.clone(),
+		meters: usage.meters.iter().map(|(k, m)| (k.clone(), Some(m.clone()))).collect(),
 	};
 	append_sample_to(&history_path(app)?, &sample)
 }
@@ -1377,25 +1400,25 @@ fn window_icon_px() -> u32 {
 
 
 
-// 直近に取得した session と week(全モデル)のメーター。設定変更など、新たな取得を伴わずにトレイアイコンを描き直すときの現在値の供給元にする。取得のたびに update_tray_icon が更新する。
-static LAST_METERS: LazyLock<Mutex<(Option<Meter>, Option<Meter>)>> = LazyLock::new(|| Mutex::new((None, None)));
+// 直近に取得したメーター一式。設定変更など、新たな取得を伴わずにトレイアイコンを描き直すときの現在値の供給元にする。取得のたびに update_tray_icon が更新する。
+static LAST_METERS: LazyLock<Mutex<BTreeMap<String, Meter>>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
 
 
 // 新たな取得を伴わずにトレイを描き直すための現在値を返す。直近取得のメーターを優先し、無ければ履歴の最新サンプルへ退く。どちらも得られなければ None。
 fn latest_usage(app: &tauri::AppHandle) -> Option<Usage> {
-	let (session, week_all) = LAST_METERS.lock().unwrap().clone();
-	if session.is_some() || week_all.is_some() {
-		return Some(Usage { session, week_all, week_sonnet: None, raw: String::new() });
+	let meters = LAST_METERS.lock().unwrap().clone();
+	if !meters.is_empty() {
+		return Some(Usage { meters, labels: BTreeMap::new(), raw: String::new() });
 	}
 	let history = read_history(app).ok()?;
-	let last = history.iter().rev().find(|s| s.session.is_some() || s.week_all.is_some() || s.week_sonnet.is_some())?;
-	Some(Usage {
-		session: last.session.clone(),
-		week_all: last.week_all.clone(),
-		week_sonnet: last.week_sonnet.clone(),
-		raw: String::new(),
-	})
+	let last = history.iter().rev().find(|s| s.meters.values().any(|m| m.is_some()))?;
+	let meters = last
+		.meters
+		.iter()
+		.filter_map(|(k, m)| m.clone().map(|m| (k.clone(), m)))
+		.collect();
+	Some(Usage { meters, labels: BTreeMap::new(), raw: String::new() })
 }
 
 
@@ -1415,19 +1438,21 @@ fn tray_burndown_px() -> (u32, u32) {
 
 
 
-// 設定の対象枠(session/week)について、履歴と現在値から簡易バーンダウンを描いて (RGBA, 幅, 高さ) を返す。現在値・リセット時刻・窓の起点が揃わず描けないときは None を返し、呼び出し側でゲージへ退かせる。
+// 設定の対象枠(session/week/week_fable)について、履歴と現在値から簡易バーンダウンを描いて (RGBA, 幅, 高さ) を返す。現在値・リセット時刻・窓の起点が揃わず描けないときは None を返し、呼び出し側でゲージへ退かせる。
 fn try_render_tray_burndown(app: &tauri::AppHandle, usage: &Usage, target: &str) -> Option<(Vec<u8>, u32, u32)> {
-	let is_week = target == "week";
-	let window_ms = if is_week { WEEK_WINDOW_MS } else { SESSION_WINDOW_MS };
-	let cur = if is_week { usage.week_all.as_ref() } else { usage.session.as_ref() };
+	let (window_ms, key) = match target {
+		"week" => (WEEK_WINDOW_MS, METER_WEEK_ALL),
+		"week_fable" => (WEEK_WINDOW_MS, METER_WEEK_FABLE),
+		_ => (SESSION_WINDOW_MS, METER_SESSION),
+	};
+	let cur = usage.meters.get(key);
 	let used = cur.map(|m| m.used_pct as f32)?;
 
 	let history = read_history(app).unwrap_or_default();
 	// リセット時刻文字列。現在値のものを優先し、無ければ履歴の新しい方から探す。
 	let reset_str = cur.and_then(|m| m.resets.clone()).or_else(|| {
 		history.iter().rev().find_map(|s| {
-			let m = if is_week { s.week_all.as_ref() } else { s.session.as_ref() };
-			m.and_then(|x| x.resets.clone())
+			s.meters.get(key).and_then(|m| m.as_ref()).and_then(|x| x.resets.clone())
 		})
 	})?;
 
@@ -1440,7 +1465,7 @@ fn try_render_tray_burndown(app: &tauri::AppHandle, usage: &Usage, target: &str)
 	let mut samples: Vec<(f32, f32)> = history
 		.iter()
 		.filter_map(|s| {
-			let m = if is_week { s.week_all.as_ref() } else { s.session.as_ref() }?;
+			let m = s.meters.get(key)?.as_ref()?;
 			let ts = s.ts as i64;
 			if ts < start_ms || ts > reset_ms {
 				return None;
@@ -1460,16 +1485,17 @@ fn try_render_tray_burndown(app: &tauri::AppHandle, usage: &Usage, target: &str)
 
 
 
-// 取得した利用枠をトレイアイコンへ反映する。設定 tray_style が "burndown-session"/"burndown-week" なら対象枠の簡易バーンダウンを、"gauge"(または描けないとき)なら外周リング(週間)＋中央の円(5時間枠)のゲージを、現在の DPI に合う寸法で描いて差し替える。窓を隠していてもトレイは生きているため、隠したままでも最新の消費率をアイコンへ反映できる。値が揃わないときは既定アイコンのままにする。
+// 取得した利用枠をトレイアイコンへ反映する。設定 tray_style が "burndown-session"/"burndown-week"/"burndown-week-fable" なら対象枠の簡易バーンダウンを、"gauge"(または描けないとき)なら外周リング(週間)＋中央の円(5時間枠)のゲージを、現在の DPI に合う寸法で描いて差し替える。窓を隠していてもトレイは生きているため、隠したままでも最新の消費率をアイコンへ反映できる。値が揃わないときは既定アイコンのままにする。
 fn update_tray_icon(app: &tauri::AppHandle, usage: &Usage) {
 	// 設定変更時の描き直しに使えるよう、現在値を控えておく。
-	*LAST_METERS.lock().unwrap() = (usage.session.clone(), usage.week_all.clone());
+	*LAST_METERS.lock().unwrap() = usage.meters.clone();
 
 	let settings = read_settings(app);
 	// バーンダウン指定なら対象枠を取り出す。ゲージ指定や未知の値は None にしてゲージへ回す。
 	let target = match settings.tray_style.as_str() {
 		"burndown-session" => Some("session"),
 		"burndown-week" => Some("week"),
+		"burndown-week-fable" => Some("week_fable"),
 		_ => None,
 	};
 	if let Some(target) = target {
@@ -1482,8 +1508,8 @@ fn update_tray_icon(app: &tauri::AppHandle, usage: &Usage) {
 	}
 
 	// ゲージ。バーンダウンを描けないときの退避も兼ねる。どちらの枠も無ければ既定アイコンのまま。
-	let session = usage.session.as_ref().map(|m| m.used_pct as f32);
-	let week = usage.week_all.as_ref().map(|m| m.used_pct as f32);
+	let session = usage.meters.get(METER_SESSION).map(|m| m.used_pct as f32);
+	let week = usage.meters.get(METER_WEEK_ALL).map(|m| m.used_pct as f32);
 	if session.is_none() && week.is_none() {
 		return;
 	}
@@ -1506,8 +1532,8 @@ fn update_tray_icon(app: &tauri::AppHandle, usage: &Usage) {
 // 取得した利用枠を、トレイと同じゲージ図柄でウィンドウアイコンへも反映する。タスクバーのボタンや Alt+Tab のアイコンが、焼き込んだ固定値ではなく現在の消費率を表すようにする。効くのは窓を表示している間に限る。どちらの枠も取得できないときは既定のウィンドウアイコンのままにする。
 #[cfg(windows)]
 fn update_window_icon(app: &tauri::AppHandle, usage: &Usage) {
-	let session = usage.session.as_ref().map(|m| m.used_pct as f32);
-	let week = usage.week_all.as_ref().map(|m| m.used_pct as f32);
+	let session = usage.meters.get(METER_SESSION).map(|m| m.used_pct as f32);
+	let week = usage.meters.get(METER_WEEK_ALL).map(|m| m.used_pct as f32);
 	if session.is_none() && week.is_none() {
 		return;
 	}
@@ -1540,21 +1566,23 @@ fn update_window_icon(_app: &tauri::AppHandle, _usage: &Usage) {}
 
 
 
-// トレイメニューの図柄選択で使う CheckMenuItem 3種を保持する。メニューイベントと設定コマンドの双方から選択状態を書き換えられるよう、Tauri の管理状態として持ち回す。
+// トレイメニューの図柄選択で使う CheckMenuItem 4種を保持する。メニューイベントと設定コマンドの双方から選択状態を書き換えられるよう、Tauri の管理状態として持ち回す。
 struct TrayStyleItems {
 	session: CheckMenuItem<tauri::Wry>,
 	week: CheckMenuItem<tauri::Wry>,
+	week_fable: CheckMenuItem<tauri::Wry>,
 	gauge: CheckMenuItem<tauri::Wry>,
 }
 
 
 
 
-// 図柄選択の CheckMenuItem 3種のうち、指定の図柄に対応する1つだけへチェックを立てて単一選択を保つ。muda はラジオ項目を持たないため CheckMenuItem のチェックで代用する。管理状態が未登録(トレイ構成前)のときは何もしない。
+// 図柄選択の CheckMenuItem 4種のうち、指定の図柄に対応する1つだけへチェックを立てて単一選択を保つ。muda はラジオ項目を持たないため CheckMenuItem のチェックで代用する。管理状態が未登録(トレイ構成前)のときは何もしない。
 fn sync_tray_style_checks(app: &tauri::AppHandle, style: &str) {
 	if let Some(items) = app.try_state::<TrayStyleItems>() {
 		let _ = items.session.set_checked(style == "burndown-session");
 		let _ = items.week.set_checked(style == "burndown-week");
+		let _ = items.week_fable.set_checked(style == "burndown-week-fable");
 		let _ = items.gauge.set_checked(style == "gauge");
 	}
 }
@@ -1592,16 +1620,17 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 	// トレイアイコンに表示する図柄を切り替えるラジオ選択。muda はラジオ項目を持たないため CheckMenuItem を単一選択として扱い、選択のたびに他をチェック解除する。初期チェックは現在の設定に合わせる。ラベルは設定画面の図柄ピッカーの表記に揃える。
 	let style = read_settings(app.handle()).tray_style;
-	let style_session = CheckMenuItem::with_id(app, "tray_style:burndown-session", "セッションバーンダウン", true, style == "burndown-session", None::<&str>)?;
-	let style_week = CheckMenuItem::with_id(app, "tray_style:burndown-week", "週間バーンダウン", true, style == "burndown-week", None::<&str>)?;
+	let style_session = CheckMenuItem::with_id(app, "tray_style:burndown-session", "セッション", true, style == "burndown-session", None::<&str>)?;
+	let style_week = CheckMenuItem::with_id(app, "tray_style:burndown-week", "週間 (全モデル)", true, style == "burndown-week", None::<&str>)?;
+	let style_week_fable = CheckMenuItem::with_id(app, "tray_style:burndown-week-fable", "週間 (Fable)", true, style == "burndown-week-fable", None::<&str>)?;
 	let style_gauge = CheckMenuItem::with_id(app, "tray_style:gauge", "円グラフ", true, style == "gauge", None::<&str>)?;
-	let style_menu = Submenu::with_items(app, "アイコン", true, &[&style_session, &style_week, &style_gauge])?;
+	let style_menu = Submenu::with_items(app, "アイコン", true, &[&style_session, &style_week, &style_week_fable, &style_gauge])?;
 
 	let quit = MenuItem::with_id(app, "quit", "終了", true, None::<&str>)?;
 	let menu = Menu::with_items(app, &[&header, &header_separator, &show, &settings, &style_menu, &quit])?;
 
-	// メニューイベントと設定コマンドの双方から図柄選択のチェックを更新できるよう、CheckMenuItem 3種を管理状態へ預ける。
-	app.manage(TrayStyleItems { session: style_session, week: style_week, gauge: style_gauge });
+	// メニューイベントと設定コマンドの双方から図柄選択のチェックを更新できるよう、CheckMenuItem 4種を管理状態へ預ける。
+	app.manage(TrayStyleItems { session: style_session, week: style_week, week_fable: style_week_fable, gauge: style_gauge });
 
 	let mut builder = TrayIconBuilder::with_id(TRAY_ID)
 		.tooltip("払底枯渇")
@@ -1612,6 +1641,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 			// アイコンの図柄のラジオ選択。選んだ図柄を保存し、チェックを1つへ揃えてアイコンを描き直す。
 			"tray_style:burndown-session" => select_tray_style(app, "burndown-session"),
 			"tray_style:burndown-week" => select_tray_style(app, "burndown-week"),
+			"tray_style:burndown-week-fable" => select_tray_style(app, "burndown-week-fable"),
 			"tray_style:gauge" => select_tray_style(app, "gauge"),
 			// 終了前に現在のウィンドウ配置を保存する。トレイから直接終了する場合は CloseRequested を経ないため、ここで保存しないと最後の移動・リサイズが残らない。
 			"quit" => {
@@ -1807,24 +1837,58 @@ pub fn run() {
 mod tests {
 	use super::*;
 
-	// /usage の実出力に倣ったサンプル。リセット時刻は分の無い表記(7pm)も含めて検証する。
-	const SAMPLE: &str = "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 33% used · resets Jun 23, 4:10am (Asia/Tokyo)\nCurrent week (all models): 50% used · resets Jun 27, 7pm (Asia/Tokyo)\nCurrent week (Sonnet only): 0% used\n";
+	// /usage の実出力に倣ったサンプル。メーター群の後に続く分析ブロック(%を含むがメーターではない行)も含め、誤検出しないことを検証する。
+	const SAMPLE: &str = "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 82% used · resets Jul 18, 1:29pm (Asia/Tokyo)\nCurrent week (all models): 46% used · resets Jul 18, 6:59pm (Asia/Tokyo)\nCurrent week (Fable): 87% used · resets Jul 18, 6:59pm (Asia/Tokyo)\n\nWhat's contributing to your limits usage?\nApproximate, based on local sessions on this machine — does not include other devices or claude.ai.\n\nLast 24h · 659 requests · 23 sessions\n  34% of your usage was at >150k context\n  Top skills: /commit 16%, /winui:winui-packaging 2%\n";
 
 	#[test]
-	fn parses_three_meters() {
+	fn parses_meters_from_current_response() {
 		let u = parse_usage(SAMPLE);
 
-		let s = u.session.expect("session メーターが取れること");
-		assert_eq!(s.used_pct, 33);
-		assert_eq!(s.resets.as_deref(), Some("Jun 23, 4:10am (Asia/Tokyo)"));
+		// 分析ブロックの行がメーターとして混入しないこと。
+		assert_eq!(u.meters.len(), 3);
 
-		let w = u.week_all.expect("week_all メーターが取れること");
-		assert_eq!(w.used_pct, 50);
-		assert_eq!(w.resets.as_deref(), Some("Jun 27, 7pm (Asia/Tokyo)"));
+		let s = u.meters.get("session").expect("session メーターが取れること");
+		assert_eq!(s.used_pct, 82);
+		assert_eq!(s.resets.as_deref(), Some("Jul 18, 1:29pm (Asia/Tokyo)"));
 
-		let ws = u.week_sonnet.expect("week_sonnet メーターが取れること");
+		let w = u.meters.get("week_all").expect("week_all メーターが取れること");
+		assert_eq!(w.used_pct, 46);
+		assert_eq!(w.resets.as_deref(), Some("Jul 18, 6:59pm (Asia/Tokyo)"));
+
+		let f = u.meters.get("week_fable").expect("week_fable メーターが取れること");
+		assert_eq!(f.used_pct, 87);
+		assert_eq!(f.resets.as_deref(), Some("Jul 18, 6:59pm (Asia/Tokyo)"));
+
+		// 未知の枠を表示するときの名前として、応答上のラベルが控えられること。
+		assert_eq!(u.labels.get("week_fable").map(String::as_str), Some("week (Fable)"));
+	}
+
+
+
+
+	// resets を伴わないメーター行と、分の無いリセット表記(7pm)を読めること。"Sonnet only" のラベルが従来の履歴と同じ week_sonnet キーへ落ち、キーの連続性が保たれることも確認する。
+	#[test]
+	fn parses_meters_without_resets() {
+		let u = parse_usage("Current session: 33% used · resets Jun 23, 4:10am (Asia/Tokyo)\nCurrent week (all models): 50% used · resets Jun 27, 7pm (Asia/Tokyo)\nCurrent week (Sonnet only): 0% used\n");
+		assert_eq!(u.meters.get("week_all").unwrap().resets.as_deref(), Some("Jun 27, 7pm (Asia/Tokyo)"));
+		let ws = u.meters.get("week_sonnet").expect("week_sonnet メーターが取れること");
 		assert_eq!(ws.used_pct, 0);
 		assert_eq!(ws.resets, None);
+	}
+
+
+
+
+	// ラベルからのキー導出。主部と括弧内修飾の正規化と、修飾なし・未知ラベルの扱いを確認する。
+	#[test]
+	fn derives_meter_keys() {
+		assert_eq!(meter_key("session"), "session");
+		assert_eq!(meter_key("week (all models)"), "week_all");
+		assert_eq!(meter_key("week (Sonnet only)"), "week_sonnet");
+		assert_eq!(meter_key("week (Fable)"), "week_fable");
+		assert_eq!(meter_key("week (Opus 4.8)"), "week_opus");
+		assert_eq!(meter_key("month"), "month");
+		assert_eq!(meter_key(""), "");
 	}
 
 
@@ -1836,13 +1900,11 @@ mod tests {
 
 
 
-	// 利用枠以外のテキスト(/usage が地の文を返した場合など)では3枠とも None になることを確認する。fetch_usage はこの状態を原因付きのエラーへ変える。
+	// 利用枠以外のテキスト(/usage が地の文を返した場合など)ではメーターが空になることを確認する。fetch_usage はこの状態を原因付きのエラーへ変える。
 	#[test]
 	fn unparseable_text_yields_no_meters() {
 		let u = parse_usage("これは利用枠の出力ではない任意のテキスト。");
-		assert!(u.session.is_none());
-		assert!(u.week_all.is_none());
-		assert!(u.week_sonnet.is_none());
+		assert!(u.meters.is_empty());
 	}
 
 
@@ -1946,22 +2008,24 @@ mod tests {
 
 		let s1 = Sample {
 			ts: 1000,
-			session: Some(Meter {
-				used_pct: 33,
-				resets: Some("Jun 23, 4:10am".to_string()),
-			}),
-			week_all: None,
-			week_sonnet: Some(Meter {
-				used_pct: 0,
-				resets: None,
-			}),
+			meters: BTreeMap::from([
+				(
+					"session".to_string(),
+					Some(Meter {
+						used_pct: 33,
+						resets: Some("Jun 23, 4:10am".to_string()),
+					}),
+				),
+				(
+					"week_fable".to_string(),
+					Some(Meter {
+						used_pct: 87,
+						resets: Some("Jul 18, 6:59pm".to_string()),
+					}),
+				),
+			]),
 		};
-		let s2 = Sample {
-			ts: 2000,
-			session: None,
-			week_all: None,
-			week_sonnet: None,
-		};
+		let s2 = Sample { ts: 2000, meters: BTreeMap::new() };
 
 		append_sample_to(&path, &s1).unwrap();
 		append_sample_to(&path, &s2).unwrap();
@@ -1969,10 +2033,27 @@ mod tests {
 		let got = read_history_from(&path).unwrap();
 		assert_eq!(got.len(), 2);
 		assert_eq!(got[0].ts, 1000);
-		assert_eq!(got[0].session.as_ref().unwrap().used_pct, 33);
+		assert_eq!(got[0].meters.get("session").unwrap().as_ref().unwrap().used_pct, 33);
+		assert_eq!(got[0].meters.get("week_fable").unwrap().as_ref().unwrap().used_pct, 87);
 		assert_eq!(got[1].ts, 2000);
-		assert!(got[1].session.is_none());
+		assert!(got[1].meters.is_empty());
 
 		let _ = std::fs::remove_file(&path);
+	}
+
+
+
+
+	// 既存の履歴ファイルにある固定3枠形式の行(null の枠を含む)が、そのままサンプルとして読めることを確認する。
+	#[test]
+	fn reads_fixed_key_history_line() {
+		let line = r#"{"ts":1000,"session":{"used_pct":33,"resets":"Jun 23, 4:10am"},"week_all":null,"week_sonnet":{"used_pct":0,"resets":null}}"#;
+		let s: Sample = serde_json::from_str(line).unwrap();
+		assert_eq!(s.ts, 1000);
+		assert_eq!(s.meters.get("session").unwrap().as_ref().unwrap().used_pct, 33);
+		assert!(s.meters.get("week_all").unwrap().is_none());
+		let ws = s.meters.get("week_sonnet").unwrap().as_ref().unwrap();
+		assert_eq!(ws.used_pct, 0);
+		assert_eq!(ws.resets, None);
 	}
 }

@@ -28,30 +28,8 @@
 		<div class="window-body">
 			<main class="app" id="view-main">
 				<p id="error" class="error-banner" hidden></p>
-				<section class="panels">
-					<figure id="panel-session" class="panel">
-						<figcaption class="panel-cap">
-							<span class="panel-name" data-i18n="meter.session.label">セッション (5時間枠)</span>
-							<div id="session-head" class="meter-head"></div>
-						</figcaption>
-						<div id="session-meter" class="panel-meter"></div>
-						<div class="chart-wrap">
-							<span id="session-verdict" class="verdict idle"></span>
-							<div id="session-chart" class="chart" title="ホイールで横ズーム / Ctrl+ホイールで縦ズーム / ドラッグで移動 / ダブルクリックでリセット" data-i18n-title="chart.zoomHint"></div>
-						</div>
-					</figure>
-					<figure id="panel-week" class="panel">
-						<figcaption class="panel-cap">
-							<span class="panel-name" data-i18n="meter.week.label">週間 (全モデル)</span>
-							<div id="week-head" class="meter-head"></div>
-						</figcaption>
-						<div id="week-meter" class="panel-meter"></div>
-						<div class="chart-wrap">
-							<span id="week-verdict" class="verdict idle"></span>
-							<div id="week-chart" class="chart" title="ホイールで横ズーム / Ctrl+ホイールで縦ズーム / ドラッグで移動 / ダブルクリックでリセット" data-i18n-title="chart.zoomHint"></div>
-						</div>
-					</figure>
-				</section>
+				<!-- 利用枠パネルの差込先。中身は main.js の syncPanels が、データに現れた枠に合わせて生成する。 -->
+				<section class="panels" id="panels"></section>
 				<section class="charts" id="trend-section">
 					<figure class="chart-card">
 						<figcaption class="chart-cap">
@@ -117,6 +95,9 @@
 										</li>
 										<li class="combo-option" role="option" data-value="burndown-week" tabindex="-1">
 											<span class="combo-name" data-i18n="settings.tray.week"></span>
+										</li>
+										<li class="combo-option" role="option" data-value="burndown-week-fable" tabindex="-1">
+											<span class="combo-name" data-i18n="settings.tray.weekfable"></span>
 										</li>
 										<li class="combo-option" role="option" data-value="gauge" tabindex="-1">
 											<span class="combo-name" data-i18n="settings.tray.gauge"></span>

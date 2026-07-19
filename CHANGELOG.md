@@ -2,6 +2,12 @@
 
 > 🌐 **[日本語 →](CHANGELOG.ja.md)**
 
+## [1.3.0] - 2026-07-19
+
+- Added support for the newly introduced "Current week (Fable)" usage limit, and reworked the layout to accommodate the extra panel.
+- Added a "Weekly (Fable)" chart to the tray icon designs as well.
+- Made the usage-limit panels generate dynamically from the fetched data, so future additions or removals of limits are picked up automatically.
+
 ## [1.2.0] - 2026-07-18
 
 - Moved the last-updated time and accumulated data count to the title bar, and removed the buttons that were in the header.

@@ -40,8 +40,8 @@
 	--heat-zero: rgb(31, 58, 74);
 	/* ヒートマップセルの角丸。一日の左端・右端にだけ当てる。 */
 	--heat-radius: 3px;
-	/* ヒートマップの行(=セル)の高さ。曜日ラベルと時刻ヘッダの行もこれに揃えて畳む。 */
-	--heat-cell-height: 11px;
+	/* ヒートマップの行(=セル)の最低高さ。曜日ラベルと時刻ヘッダの行もこれに揃えて畳む。 */
+	--heat-cell-height: 12px;
 	/* 曜日ラベルの文字サイズ。 */
 	--heat-cell-fontsize: 0.5rem;
 	/* 時刻ヘッダの文字サイズ。補助情報なので曜日より一回り小さくする。 */
@@ -208,10 +208,10 @@ body {
 /* メイン表示の本体。デスクトップの窓に合わせ、中央寄せの固定幅にせず窓いっぱいに広げる。横へ広がるほどバーンダウンは同じ期間を広い横幅で描く。flex:1 でウィンドウ本体の高さいっぱいに広がり、余白はチャート群へ配る。min-height は既定の auto のままにして、窓が低いときは内容なりの高さを保ち、ウィンドウ本体側でスクロールさせる。 */
 .app {
 	flex: 1;
-	padding: 20px 20px;
+	padding: 2px 14px 14px 14px;
 	display: flex;
 	flex-direction: column;
-	gap: 16px;
+	gap: 10px;
 }
 
 /* 設定ビュー。メインの内容を設定画面へ切り替えて見せる。中央寄せと余白はメイン画面に合わせる。 */
@@ -690,7 +690,7 @@ button:disabled {
 	flex: 1;
 	display: flex;
 	flex-direction: column;
-	gap: 18px;
+	gap: 10px;
 }
 
 .panel {
@@ -698,8 +698,8 @@ button:disabled {
 	margin: 0;
 	display: flex;
 	flex-direction: column;
-	gap: 10px;
-	padding: 14px 14px 8px;
+	gap: 8px;
+	padding: 10px 14px 0px 14px;
 	border: 1px solid rgba(0, 0, 0, 0.1);
 	border-radius: var(--card-radius);
 	background-color: rgba(0, 0, 0, 0.015);
@@ -819,7 +819,7 @@ button:disabled {
 	margin: 0;
 	display: flex;
 	flex-direction: column;
-	padding: 14px 14px 8px;
+	padding: 10px 14px 14px 14px;
 	border: 1px solid rgba(0, 0, 0, 0.1);
 	border-radius: var(--card-radius);
 	background-color: rgba(0, 0, 0, 0.015);
@@ -840,7 +840,8 @@ button:disabled {
 .chart-wrap {
 	position: relative;
 	flex: 1;
-	min-height: 160px;
+	/* バーンダウンが確保する最低限の高さ。窓が低いときは panels がこの床で止まり、縦余白の削減は消費傾向ヒートマップ側から先に行われる。両方が床に達したらウィンドウ本体側でスクロールする。 */
+	min-height: 200px;
 	display: flex;
 	flex-direction: column;
 }
@@ -983,8 +984,18 @@ button:disabled {
 	.panels {
 		display: grid;
 		grid-template-columns: 1fr 1fr;
-		/* 1行だけのグリッドにこの行を 1fr で満たさせ、2枚のパネルを縦いっぱい(=panels の高さ)へ引き伸ばす。これが無いと行が内容なりに畳まれ、2カラム時にチャートが縦へ伸びない。 */
-		grid-template-rows: 1fr;
+		/* パネル数から生まれる各行を 1fr で均等に満たさせ、パネルを縦いっぱい(=panels の高さ)へ引き伸ばす。これが無いと行が内容なりに畳まれ、2カラム時にチャートが縦へ伸びない。パネルが3枚以上で複数行になっても各行へ等分される。 */
+		grid-auto-rows: 1fr;
+	}
+
+	/* セッションは最も粒度が細かく注視される計器なので、全幅の1段目へ置いて時間方向の解像度を確保する。週間系パネルはその下の2カラムへ対で並び、同じ7日間の時間軸を横並びで見比べられる。 */
+	#panel-session {
+		grid-column: 1 / -1;
+	}
+
+	/* セッションが1枠で全幅を占めるため、パネル総数が偶数のときは2カラム側が奇数枚になり、最後の1枚の隣に空きマスが生まれる。その場合は最後の1枚を全幅へ広げて穴を塞ぐ。 */
+	.panel:nth-child(even):last-child {
+		grid-column: 1 / -1;
 	}
 }
 

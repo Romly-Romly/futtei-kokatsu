@@ -10,10 +10,11 @@ const { listen } = window.__TAURI__.event;
 // 実行中プラットフォームが macOS か。ショートカットの表記(Ctrl↔⌘)や、ネイティブメニューと重複するキー処理の抑制に使う。
 const isMac = navigator.userAgent.includes("Macintosh");
 
-// 表示する2つの利用枠。key は get_usage が返すフィールド名に対応する。shortKey はトレイのツールチップ向け短縮ラベルの辞書キー。
-const METERS = [
-	{ key: "session", shortKey: "meter.session.short", windowMs: 5 * 3600 * 1000 },
-	{ key: "week_all", shortKey: "meter.week.short", windowMs: 7 * 24 * 3600 * 1000 },
+// 既知の利用枠の定義表。key は get_usage の meters と履歴の各行のフィールド名に対応し、表示の並び順もこの順に従う。windowMs は枠の窓長、timeLabel はバーンダウンの時間軸の表記。セッション枠は5時間と短くチャートが最小サイズでも全体が読めるため、fullView で後半の自動枠取り(右上へのズーム)を効かせず常に全体表示にする。表示名は meter.<key>.label / meter.<key>.short の辞書キーで引く。この表に無い枠がデータへ現れたときは meterDefs が週次と同じ扱いで末尾へ足す。
+const KNOWN_METERS = [
+	{ key: "session", windowMs: 5 * 3600 * 1000, timeLabel: "time", fullView: true },
+	{ key: "week_all", windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date" },
+	{ key: "week_fable", windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date" },
 ];
 
 // 現在の表示言語の辞書。applyLanguage が言語設定から組み立てて差し替える。JS で組み立てる文言はこの辞書を通して訳す。applyLanguage が走る前の既定言語として日本語を入れておく。
@@ -42,17 +43,20 @@ let titlebarGaugeEl;
 
 // 状態行の件数部分の文言。幅が足りない時は表示から落とすため、DOM とは別に保持して復帰できるようにする。
 let statusCountText = "";
-let sessionChartEl;
-let sessionVerdictEl;
-let weekChartEl;
-let weekVerdictEl;
+let panelsEl;
 let heatmapEl;
 let viewMainEl;
 let viewSettingsEl;
 let trendSectionEl;
 
-// パネル列(バーンダウン2枚)の要素。段組み切り替えのアニメーションで位置を測るために保持する。
+// パネル列の各パネル要素。段組み切り替えのアニメーションで位置を測るために保持し、syncPanels がパネルの増減のたびに取り直す。
 let panelEls = [];
+
+// 直近に syncPanels が組んだパネルの枠キーの並び。同じ並びのうちは DOM の組み替えを省くための控え。
+let panelKeysSig = "";
+
+// チャートのマウント寸法を監視する ResizeObserver。DOMContentLoaded で用意し、syncPanels が生成したパネルのチャートを監視へ加える。
+let chartResizeObserver = null;
 
 // 直近の段組み状態(2カラムか)と各パネルの位置。ResizeObserver の発火ごとに更新し、段組みが切り替わった瞬間の旧位置として使う。
 let prevTwoColumn = null;
@@ -70,7 +74,7 @@ const reduceMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 // 設定ウィンドウで操作する設定値。Rust の settings.json と同じ形をそのまま保持する。
 let settings = null;
 
-// 各利用枠のメーター差込先パネルを利用枠キーで引く。renderMeters がここへ本体を差し込む。
+// 各利用枠のパネル一式(パネル要素・枠名・メーター見出し・メーター本体・チャート・判定バッジ)を利用枠キーで引く。syncPanels が組み立てて管理し、renderMeters と renderCharts がここへ描き込む。
 const meterMounts = {};
 
 // 直前にトレイへ送ったツールチップ文字列。同じ内容なら IPC を省いて毎秒の無駄打ちを抑える。
@@ -205,8 +209,23 @@ function renderMeter(meter, metrics)
 
 
 
+// 履歴の1行(ts と各枠が平坦に並ぶ)から、値のある枠だけを {キー: メーター} で取り出す。
+function sampleMeters(sample)
+{
+	const meters = {};
+	for (const key of Object.keys(sample))
+	{
+		if (key !== "ts" && sample[key])
+			meters[key] = sample[key];
+	}
+	return meters;
+}
+
+
+
+
 // 画面へ出す利用枠とその取得時刻を決める。
-// 現在値があればそれを、無ければ履歴の最新サンプルへ退いてその時刻を併せて返す。
+// 現在値があればそれを、無ければ履歴の最新サンプルを get_usage と同じ形(meters/labels)へ包んで返し、その時刻を併せて返す。
 // 取得に失敗して現在値が得られなくても、蓄積した履歴から表示を保つための土台。at は状態行がデータの古さを示すのに使う。
 function displayUsage()
 {
@@ -216,11 +235,52 @@ function displayUsage()
 	for (let i = state.history.length - 1; i >= 0; i--)
 	{
 		const s = state.history[i];
-		if (s.session || s.week_all || s.week_sonnet)
-			return { usage: s, at: new Date(s.ts) };
+		const meters = sampleMeters(s);
+		if (Object.keys(meters).length > 0)
+			return { usage: { meters, labels: {} }, at: new Date(s.ts) };
 	}
 
 	return { usage: null, at: null };
+}
+
+
+
+
+// 表示する利用枠の定義列を決める。表示中のデータ(現在値または履歴の最新サンプル)に現れた枠を、既知の定義表の並び順を先頭に、表に無い枠は週次と同じ扱いでキー順に末尾へ足して返す。データがまだ何も無い起動直後は、主要2枠の骨組みを出して取得を待つ。
+function meterDefs()
+{
+	const usage = displayUsage().usage;
+	const present = new Set(usage ? Object.keys(usage.meters) : []);
+	if (present.size === 0)
+		return KNOWN_METERS.filter((d) => d.key === "session" || d.key === "week_all");
+
+	const defs = [];
+	for (const d of KNOWN_METERS)
+	{
+		if (present.delete(d.key))
+			defs.push(d);
+	}
+	for (const key of [...present].sort())
+		defs.push({ key, windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date" });
+
+	return defs;
+}
+
+
+
+
+// 利用枠の表示名を決める。kind は "label"(パネル見出し) か "short"(ツールチップ)。辞書に meter.<キー>.<kind> の訳があればそれを使い、無い未知の枠は応答上のラベルを、それも無ければキーを整形して使う。
+function meterLabelFor(key, kind)
+{
+	const dictKey = `meter.${key}.${kind}`;
+	const text = t(dictKey);
+	if (text !== dictKey)
+		return text;
+
+	if (state.usage && state.usage.labels && state.usage.labels[key])
+		return state.usage.labels[key];
+
+	return key.replace(/_/g, " ");
 }
 
 
@@ -237,9 +297,9 @@ function displayUsage()
 function computeRows(now)
 {
 	const usage = displayUsage().usage;
-	return METERS.map((def) =>
+	return meterDefs().map((def) =>
 	{
-		const meter = usage ? usage[def.key] : null;
+		const meter = usage && usage.meters[def.key] ? usage.meters[def.key] : null;
 		const metrics = meter ? paceMetrics(state.history, def.key, def.windowMs, resetStringFor(def.key), now, meter.used_pct) : { idle: true };
 		return { def, meter, metrics };
 	});
@@ -385,6 +445,8 @@ function render()
 {
 	renderStatus();
 
+	// パネルの構成(枠の増減)はデータの更新経由でしか変わらないため、毎秒の tick ではなくここで揃える。
+	syncPanels(meterDefs());
 	renderMeters();
 
 	renderCharts();
@@ -412,9 +474,9 @@ async function updateTitlebarGauge()
 	if (!titlebarGaugeEl)
 		return;
 
-	const usage = state.usage;
-	const session = usage && usage.session ? usage.session.used_pct : null;
-	const week = usage && usage.week_all ? usage.week_all.used_pct : null;
+	const meters = state.usage ? state.usage.meters : null;
+	const session = meters && meters.session ? meters.session.used_pct : null;
+	const week = meters && meters.week_all ? meters.week_all.used_pct : null;
 	if (session == null && week == null)
 	{
 		titlebarGaugeEl.hidden = true;
@@ -470,25 +532,33 @@ async function refresh()
 	state.error = null;
 	render();
 
-	try
-	{
-		state.usage = await invoke("get_usage");
-		state.phase = "ready";
-		state.updatedAt = new Date();
-	}
-	catch (e)
-	{
-		state.phase = "error";
-		state.error = typeof e === "string" ? e : String(e);
-	}
+	// 現在値の取得は claude の起動を伴い数秒かかるため、履歴の読み込みを並行で走らせ、先に返った履歴で貯めたデータの表示を立ち上げる。get_usage の失敗はここで包んでおき、後段でまとめて状態へ移す。
+	const usagePromise = invoke("get_usage").then(
+		(usage) => ({ usage }),
+		(e) => ({ error: typeof e === "string" ? e : String(e) })
+	);
 
 	try
 	{
 		state.history = await invoke("get_history");
+		render();
 	}
 	catch (e)
 	{
 		// 履歴の取得失敗は表示の主目的ではないため握りつぶす
+	}
+
+	const got = await usagePromise;
+	if (got.usage)
+	{
+		state.usage = got.usage;
+		state.phase = "ready";
+		state.updatedAt = new Date();
+	}
+	else
+	{
+		state.phase = "error";
+		state.error = got.error;
 	}
 
 	render();
@@ -532,35 +602,116 @@ async function applyUsage(usage)
 
 
 
-// 蓄積した時系列から session と week のバーンダウンを描き、判定バッジを更新する。
+// 蓄積した時系列から各利用枠のバーンダウンを描き、判定バッジを更新する。対象の枠と描き方は meterDefs の定義に従う。
 function renderCharts()
 {
 	const now = new Date();
-	const windows = [
-		// セッション枠は5時間ぶんと短く、チャートが最小サイズでも全体が読めるため、後半での自動枠取り(右上へのズーム)を効かせず常に全体表示にする。週枠は7日と長いので自動枠取りを残す。
-		{ key: "session", mount: sessionChartEl, badge: sessionVerdictEl, windowMs: 5 * 3600 * 1000, timeLabel: "time", fullView: true },
-		{ key: "week_all", mount: weekChartEl, badge: weekVerdictEl, windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date" },
-	];
-
-	for (const w of windows)
+	for (const def of meterDefs())
 	{
-		const resetStr = resetStringFor(w.key);
+		const slot = meterMounts[def.key];
+		if (!slot)
+			continue;
+
+		const resetStr = resetStringFor(def.key);
 		if (!resetStr)
 		{
-			w.mount.replaceChildren();
-			setBadge(w.badge, { state: "idle", label: "" });
+			slot.chart.replaceChildren();
+			setBadge(slot.verdict, { state: "idle", label: "" });
 			continue;
 		}
-		const verdict = renderUsageChart(w.mount, {
+		const verdict = renderUsageChart(slot.chart, {
 			history: state.history,
-			key: w.key,
+			key: def.key,
 			resetStr,
-			windowMs: w.windowMs,
+			windowMs: def.windowMs,
 			now,
-			timeLabel: w.timeLabel,
-			fullView: w.fullView,
+			timeLabel: def.timeLabel,
+			fullView: def.fullView,
 		});
-		setBadge(w.badge, verdict);
+		setBadge(slot.verdict, verdict);
+	}
+}
+
+
+
+
+// 1枠分のパネル DOM を組み立てて meterMounts 用の一式を返す。枠名の文言は言語に依存するため、ここでは入れず syncPanels が毎回当てる。
+function createPanel(key)
+{
+	const panel = document.createElement("figure");
+	panel.id = `panel-${key}`;
+	panel.className = "panel";
+
+	const cap = document.createElement("figcaption");
+	cap.className = "panel-cap";
+	const name = document.createElement("span");
+	name.className = "panel-name";
+	const head = document.createElement("div");
+	head.className = "meter-head";
+	cap.append(name, head);
+
+	const mount = document.createElement("div");
+	mount.className = "panel-meter";
+
+	const wrap = document.createElement("div");
+	wrap.className = "chart-wrap";
+	const verdict = document.createElement("span");
+	verdict.className = "verdict idle";
+	const chart = document.createElement("div");
+	chart.className = "chart";
+	wrap.append(verdict, chart);
+
+	panel.append(cap, mount, wrap);
+
+	// 生成したチャートも寸法変化に追従して描き直せるよう監視へ加える。
+	if (chartResizeObserver)
+		chartResizeObserver.observe(chart);
+
+	return { panel, name, head, mount, chart, verdict };
+}
+
+
+
+
+// 表示する利用枠のパネル群を定義の並びに合わせて用意する。枠の増減があったときだけ DOM を組み替え、並びが同じうちは言語切替に備えて枠名とヒント文言の差し替えだけを行う。
+function syncPanels(defs)
+{
+	const sig = defs.map((d) => d.key).join(",");
+	if (sig !== panelKeysSig)
+	{
+		panelKeysSig = sig;
+
+		// 消えた枠のパネルを畳み、チャートの監視も外す。
+		const keys = new Set(defs.map((d) => d.key));
+		for (const key of Object.keys(meterMounts))
+		{
+			if (keys.has(key))
+				continue;
+
+			if (chartResizeObserver)
+				chartResizeObserver.unobserve(meterMounts[key].chart);
+			meterMounts[key].panel.remove();
+			delete meterMounts[key];
+		}
+
+		// 新しい枠のパネルを作り、定義の並び順で差し込む。appendChild は既存要素なら移動になるため、これで並びも揃う。
+		for (const def of defs)
+		{
+			if (!meterMounts[def.key])
+				meterMounts[def.key] = createPanel(def.key);
+			panelsEl.appendChild(meterMounts[def.key].panel);
+		}
+
+		// 段組みアニメーション用のパネル一覧を取り直す。構成が変わった直後の旧位置は意味を持たないため捨てる。
+		panelEls = Array.from(panelsEl.querySelectorAll(".panel"));
+		prevPanelRects = null;
+	}
+
+	for (const def of defs)
+	{
+		const slot = meterMounts[def.key];
+		slot.name.textContent = meterLabelFor(def.key, "label");
+		slot.chart.title = t("chart.zoomHint");
 	}
 }
 
@@ -641,8 +792,8 @@ function onChartBoxResize()
 // 利用枠のリセット文字列を、現在値があればそれを、無ければ履歴の最新サンプルから得る。
 function resetStringFor(key)
 {
-	if (state.usage && state.usage[key] && state.usage[key].resets)
-		return state.usage[key].resets;
+	if (state.usage && state.usage.meters[key] && state.usage.meters[key].resets)
+		return state.usage.meters[key].resets;
 
 	for (let i = state.history.length - 1; i >= 0; i--)
 	{
@@ -762,7 +913,7 @@ function coarseRemaining(ms)
 // 1枠分の要約行を作る。使用%・ペースピル・リセットまでの残り時間を1行へまとめる。
 function tooltipLine(row, now)
 {
-	const short = t(row.def.shortKey);
+	const short = meterLabelFor(row.def.key, "short");
 	if (!row.meter)
 		return t("tooltip.fetchFailed", { name: short });
 
@@ -1833,19 +1984,24 @@ window.addEventListener("DOMContentLoaded", () => {
 	statusCountEl = document.querySelector("#status-count");
 	errorEl = document.querySelector("#error");
 	titlebarGaugeEl = document.querySelector("#titlebar-gauge");
-	sessionChartEl = document.querySelector("#session-chart");
-	sessionVerdictEl = document.querySelector("#session-verdict");
-	weekChartEl = document.querySelector("#week-chart");
-	weekVerdictEl = document.querySelector("#week-verdict");
+	panelsEl = document.querySelector("#panels");
 	heatmapEl = document.querySelector("#heatmap");
 	viewMainEl = document.querySelector("#view-main");
 	viewSettingsEl = document.querySelector("#view-settings");
 	trendSectionEl = document.querySelector("#trend-section");
 
-	meterMounts.session = { mount: document.querySelector("#session-meter"), head: document.querySelector("#session-head"), panel: document.querySelector("#panel-session") };
-	meterMounts.week_all = { mount: document.querySelector("#week-meter"), head: document.querySelector("#week-head"), panel: document.querySelector("#panel-week") };
-
-	panelEls = Array.from(document.querySelectorAll(".panels > .panel"));
+	// チャートのマウント寸法の変化に追随してバーンダウンを描き直し、viewBox の寸法を新しい横幅・高さへ合わせる。ResizeObserver は窓のリサイズに限らず、消費傾向の表示切り替えや段組みの変化などレイアウト由来の寸法変化も拾う。連続する通知は次の描画フレームまで畳み、観測ループの警告も避ける。ヒートマップは CSS グリッドが寸法へ自動追従するため対象外。監視対象のチャートはパネル生成時に syncPanels 側が加えるため、最初の render より先にここで用意する。
+	let chartResizePending = false;
+	chartResizeObserver = new ResizeObserver(() => {
+		if (chartResizePending) {
+			return;
+		}
+		chartResizePending = true;
+		requestAnimationFrame(() => {
+			chartResizePending = false;
+			onChartBoxResize();
+		});
+	});
 
 	wireTitlebar();
 	wireContextMenu();
@@ -1902,20 +2058,6 @@ window.addEventListener("DOMContentLoaded", () => {
 			updatePaletteSubmenu();
 		});
 	}
-	// チャートのマウント寸法の変化に追随してバーンダウンを描き直し、viewBox の寸法を新しい横幅・高さへ合わせる。ResizeObserver は窓のリサイズに限らず、消費傾向の表示切り替えや段組みの変化などレイアウト由来の寸法変化も拾う。連続する通知は次の描画フレームまで畳み、観測ループの警告も避ける。ヒートマップは CSS グリッドが寸法へ自動追従するため対象外。
-	let chartResizePending = false;
-	const chartResizeObserver = new ResizeObserver(() => {
-		if (chartResizePending) {
-			return;
-		}
-		chartResizePending = true;
-		requestAnimationFrame(() => {
-			chartResizePending = false;
-			onChartBoxResize();
-		});
-	});
-	chartResizeObserver.observe(sessionChartEl);
-	chartResizeObserver.observe(weekChartEl);
 	// 窓幅が変わるとタイトルバーの残り幅も変わるため、状態行の件数を出せるかどうかを測り直す。
 	window.addEventListener("resize", fitStatus);
 	setInterval(() => {
