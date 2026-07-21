@@ -26,6 +26,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(600);
 // フォーカスを失ってから自動でトレイへ畳むまでの猶予。枠なしウィンドウの縁を掴んでリサイズを始めると、窓は前面のままなのに一過性のフォーカス喪失イベントが飛ぶ。これを真に受けて即座に畳むとリサイズできないため、この間だけ待って本当に前面を失ったままかを確かめてから畳む。
 const BLUR_HIDE_GRACE: Duration = Duration::from_millis(150);
 
+// エラーログ(error.log)の上限サイズ。追記でこれを超えたら古い行から捨て、失敗が続いても際限なく育たないようにする。
+const ERROR_LOG_MAX_BYTES: usize = 64 * 1024;
+
 // トレイアイコンを生成後に取り出して操作するための固定 id。ツールチップ更新コマンドが tray_by_id で参照する。
 const TRAY_ID: &str = "main-tray";
 
@@ -99,7 +102,7 @@ impl Default for Settings {
 
 
 
-// 起動する claude 実行ファイルのパスを決める。シェルを介さず直接起動して引数化けを避けるため、Windows では npm グローバル配下の claude.exe を優先する。
+// 起動する claude 実行ファイルのパスを決める。シェルを介さず直接起動して引数化けを避けるため、Windows では npm グローバル配下の claude.exe を優先する。macOS では Finder から起動した GUI アプリにシェルの PATH が渡らないため、既知の設置場所を順に探す。
 fn resolve_claude_bin() -> PathBuf {
 	// 環境変数による明示指定があれば最優先で使う。
 	if let Ok(p) = std::env::var("CLAUDE_BIN") {
@@ -120,6 +123,18 @@ fn resolve_claude_bin() -> PathBuf {
 
 	#[cfg(not(windows))]
 	{
+		// GUI アプリとして起動されると launchd 由来の最小限の PATH しか受け取らず、PATH 探索では claude を見つけられないことがある。ネイティブインストーラ・Homebrew (Apple Silicon)・/usr/local (Intel Homebrew や npm グローバル) の順に既知の設置場所を確かめる。
+		let mut candidates: Vec<PathBuf> = Vec::new();
+		if let Ok(home) = std::env::var("HOME") {
+			candidates.push(PathBuf::from(home).join(".local/bin/claude"));
+		}
+		candidates.push(PathBuf::from("/opt/homebrew/bin/claude"));
+		candidates.push(PathBuf::from("/usr/local/bin/claude"));
+		for exe in candidates {
+			if exe.exists() {
+				return exe;
+			}
+		}
 		PathBuf::from("claude")
 	}
 }
@@ -432,6 +447,56 @@ fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 
 
+// エラーログ(error.log)のパス。履歴や設定と同じくアプリのデータディレクトリ直下に置く。
+fn error_log_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+	let dir = app
+		.path()
+		.app_data_dir()
+		.map_err(|e| format!("データディレクトリの取得に失敗しました: {}", e))?;
+	Ok(dir.join("error.log"))
+}
+
+
+
+
+
+
+
+
+
+
+// 失敗内容を現地日時付きで error.log へ1行追記する。配布版はコンソールを持たず標準エラーは捨てられるため、後から失敗を追えるようファイルへ残す。開発時に見えるよう標準エラーへも同じ内容を流す。ファイルが上限を超えたら古い行から捨てて肥大化を防ぐ。ログ書き込み自体の失敗は計測を妨げないよう握り潰す。
+fn log_error(app: &tauri::AppHandle, message: &str) {
+	eprintln!("{}", message);
+	let path = match error_log_path(app) {
+		Ok(p) => p,
+		Err(_) => return,
+	};
+	if let Some(parent) = path.parent() {
+		let _ = fs::create_dir_all(parent);
+	}
+	let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+	let mut content = fs::read_to_string(&path).unwrap_or_default();
+	content.push_str(&format!("{} {}\n", stamp, message));
+	// 上限を超えたら、末尾から数えて上限内に収まる最初の行頭まで先頭を切り落とす。改行(ASCII)の直後で切るため文字境界を跨がない。
+	if content.len() > ERROR_LOG_MAX_BYTES {
+		let target = content.len() - ERROR_LOG_MAX_BYTES;
+		if let Some(cut) = content.match_indices('\n').map(|(i, _)| i + 1).find(|&i| i >= target) {
+			content = content[cut..].to_string();
+		}
+	}
+	let _ = fs::write(&path, content);
+}
+
+
+
+
+
+
+
+
+
+
 // 設定ファイルを読む。ファイルが無い・壊れている場合は既定値を返し、初回起動でも破綻しないようにする。
 fn read_settings(app: &tauri::AppHandle) -> Settings {
 	let path = match settings_path(app) {
@@ -519,13 +584,13 @@ static HIDE_ON_BLUR: AtomicBool = AtomicBool::new(false);
 
 
 
-// 利用枠を周期取得して履歴へ蓄積する常駐スレッドを起こす。起動直後に1度測り、以後 POLL_INTERVAL ごとに測る。取得や追記の失敗は標準エラーへ記録し、計測自体は止めない。
+// 利用枠を周期取得して履歴へ蓄積する常駐スレッドを起こす。起動直後に1度測り、以後 POLL_INTERVAL ごとに測る。取得や追記の失敗はエラーログへ記録し、計測自体は止めない。
 fn start_poller(app: tauri::AppHandle) {
 	std::thread::spawn(move || loop {
 		match fetch_usage() {
 			Ok(usage) => {
 				if let Err(e) = append_sample(&app, &usage) {
-					eprintln!("履歴の追記に失敗しました: {}", e);
+					log_error(&app, &format!("履歴の追記に失敗しました: {}", e));
 				}
 				// 新しいサンプルが採れたことをフロントエンドへ通知し、画面を自動で追従させる。
 				let _ = app.emit("usage-updated", &usage);
@@ -533,7 +598,7 @@ fn start_poller(app: tauri::AppHandle) {
 				update_tray_icon(&app, &usage);
 				update_window_icon(&app, &usage);
 			}
-			Err(e) => eprintln!("利用枠の取得に失敗しました: {}", e),
+			Err(e) => log_error(&app, &format!("利用枠の取得に失敗しました: {}", e)),
 		}
 		std::thread::sleep(POLL_INTERVAL);
 	});
@@ -548,10 +613,16 @@ fn start_poller(app: tauri::AppHandle) {
 
 
 
-// フロントエンドから呼ばれる残量取得コマンド。現在の利用枠を取得して返す。履歴の蓄積は常駐スレッドが担う。取得した値はトレイアイコンとウィンドウアイコンへも反映し、手動更新でもアイコンが追従するようにする。
+// フロントエンドから呼ばれる残量取得コマンド。現在の利用枠を取得して返す。履歴の蓄積は常駐スレッドが担う。取得した値はトレイアイコンとウィンドウアイコンへも反映し、手動更新でもアイコンが追従するようにする。取得に失敗したら常駐スレッドと同じくエラーログへ記録する。
 #[tauri::command]
 fn get_usage(app: tauri::AppHandle) -> Result<Usage, String> {
-	let usage = fetch_usage()?;
+	let usage = match fetch_usage() {
+		Ok(usage) => usage,
+		Err(e) => {
+			log_error(&app, &format!("利用枠の取得に失敗しました: {}", e));
+			return Err(e);
+		}
+	};
 	update_tray_icon(&app, &usage);
 	update_window_icon(&app, &usage);
 	Ok(usage)
@@ -570,6 +641,64 @@ fn get_usage(app: tauri::AppHandle) -> Result<Usage, String> {
 #[tauri::command]
 fn get_history(app: tauri::AppHandle) -> Result<Vec<Sample>, String> {
 	read_history(&app)
+}
+
+
+
+
+
+
+
+
+
+
+// エラーログをファイラーで選択表示するコマンド。ファイルがまだ無いときは空で作ってから開き、押しても何も起きない状態を避ける。
+#[tauri::command]
+fn open_error_log(app: tauri::AppHandle) -> Result<(), String> {
+	let path = error_log_path(&app)?;
+	if let Some(parent) = path.parent() {
+		fs::create_dir_all(parent).map_err(|e| format!("ディレクトリの作成に失敗しました: {}", e))?;
+	}
+	if !path.exists() {
+		fs::write(&path, "").map_err(|e| format!("エラーログの作成に失敗しました: {}", e))?;
+	}
+	reveal_in_file_manager(&path)
+}
+
+
+
+
+
+
+
+
+
+
+// 指定したファイルをファイラーで選択状態にして表示する。Windows は explorer の /select、macOS は open -R を使う。
+#[cfg(windows)]
+fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
+	// explorer は /select とパスをカンマ区切りの1引数として解釈する。分けて渡すと選択が効かないため、OsString に連結してから渡す。
+	let mut arg = std::ffi::OsString::from("/select,");
+	arg.push(path);
+	// explorer は選択表示に成功しても終了コード 1 を返すため、終了コードは検査せず起動できたかどうかだけを見る。
+	Command::new("explorer.exe")
+		.arg(arg)
+		.spawn()
+		.map_err(|e| format!("エクスプローラーの起動に失敗しました: {}", e))?;
+	Ok(())
+}
+
+
+
+
+#[cfg(not(windows))]
+fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
+	Command::new("open")
+		.arg("-R")
+		.arg(path)
+		.spawn()
+		.map_err(|e| format!("Finder の起動に失敗しました: {}", e))?;
+	Ok(())
 }
 
 
@@ -781,10 +910,14 @@ fn gauge_color(pct: f32) -> tiny_skia::Color {
 
 // 外周リングの外側に空ける余白(小さいほどリングが大きい)
 const ICON_RING_MARGIN: f32 = 0.00;
-// 外周リング(週間枠)の帯の太さ
-const ICON_RING_THICKNESS: f32 = 0.150;
-// 外周リングの内縁と中央円の間の隙間。
-const ICON_INNER_GAP: f32 = 0.08;
+// 外周リング(週間 Fable 枠)の帯の太さ
+const ICON_RING_THICKNESS: f32 = 0.08;
+// 外周リングと内側リングの間の隙間
+const ICON_RING_GAP: f32 = 0.02;
+// 内側リング(週間全モデル枠)の帯の太さ
+const ICON_RING2_THICKNESS: f32 = 0.12;
+// 内側リングの内縁と中央円の間の隙間。
+const ICON_INNER_GAP: f32 = 0.03;
 
 // 中央の円(5時間枠)の消費%の見せ方を選ぶ。CenterStyle::Fill は下から上へ水位のように塗り上げる方式、CenterStyle::Pie は12時起点・時計回りの扇形(円グラフ)方式。
 const ICON_CENTER_STYLE: CenterStyle = CenterStyle::Pie;
@@ -815,53 +948,25 @@ enum CenterStyle {
 
 
 
-// 指定の辺長(px)で、外周のリングゲージと中央の円ゲージを一枚に描き、ストレートアルファの RGBA バイト列を返す。外側のリングは週間枠(week)の消費%を12時方向から時計回りの弧で表す。中央の円はセッション(5時間枠, session)の消費%を表し、ICON_CENTER_STYLE で下から上への塗り上げ(Fill)か扇形の円グラフ(Pie)かを選ぶ。値の無い枠は薄い灰のトラック・容器だけを残す。tiny-skia の画素は乗算済みアルファのため、CreateIcon が前提とするストレートアルファへ戻してから返す。
-fn render_gauge_rgba(size: u32, session: Option<f32>, week: Option<f32>) -> Vec<u8> {
-	let s = size as f32;
-	let mut pixmap = tiny_skia::Pixmap::new(size, size).expect("ゲージ用 Pixmap の確保に失敗しました");
+// 帯の中央を通る半径 ring_mid・太さ thickness のリングゲージを1本描く。まず薄い灰の背景トラックを全周に敷き、value があれば消費%ぶんの弧を12時(-90度)起点・時計回りに重ねる。tiny-skia に弧の基本図形が無いため、約2度刻みの折れ線を帯の太さへ太らせてリングにする。線端は角(Butt)で切って弧の長さを消費%ぴったりに合わせる。丸めると両端が帯の太さの半分ぶん膨らみ、実際より多い消費量に見えてしまう。
+fn draw_ring_gauge(pixmap: &mut tiny_skia::Pixmap, cx: f32, cy: f32, ring_mid: f32, thickness: f32, value: Option<f32>) {
+	let stroke = tiny_skia::Stroke { width: thickness, line_cap: tiny_skia::LineCap::Butt, ..Default::default() };
 
-	let cx = s / 2.0;
-	let cy = s / 2.0;
-
-	// 外周リング。余白を切り詰めて範囲一杯まで広げ、帯は控えめに細くして中央の円へ余地を残す。ring_mid は帯の中央を通す半径、ring_inner は帯の内縁の半径。
-	let margin = (s * ICON_RING_MARGIN).max(0.5);
-	let outer = s / 2.0 - margin;
-	let thickness = (s * ICON_RING_THICKNESS).max(1.5);
-	let ring_mid = outer - thickness / 2.0;
-	let ring_inner = outer - thickness;
-
-	// 中央の塗り上がり円。リングの内縁から少し離し、独立した円に見せる。
-	let gap = (s * ICON_INNER_GAP).max(0.5);
-	let inner_r = (ring_inner - gap).max(1.0);
-
-	let track = icon_color(ICON_TRACK_COLOR);
-
-	// タスクバーの地色から切り離すための下地円。最初に敷くことでゲージ一式の背後に回し、外周リングの外縁(outer)へ半径を合わせて全体を一つの円形へ収める。
-	let mut bb = tiny_skia::PathBuilder::new();
-	bb.push_circle(cx, cy, outer);
-	if let Some(backdrop) = bb.finish() {
-		let mut paint = tiny_skia::Paint::default();
-		paint.anti_alias = true;
-		paint.set_color(icon_color(ICON_BACKDROP_COLOR));
-		pixmap.fill_path(&backdrop, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
-	}
-
-	// 外周リングの背景トラック(全周)。
+	// 背景トラック(全周)。
 	let mut tb = tiny_skia::PathBuilder::new();
 	tb.push_circle(cx, cy, ring_mid);
 	if let Some(track_path) = tb.finish() {
 		let mut paint = tiny_skia::Paint::default();
 		paint.anti_alias = true;
-		paint.set_color(track);
-		let stroke = tiny_skia::Stroke { width: thickness, line_cap: tiny_skia::LineCap::Butt, ..Default::default() };
+		paint.set_color(icon_color(ICON_TRACK_COLOR));
 		pixmap.stroke_path(&track_path, &paint, &stroke, tiny_skia::Transform::identity(), None);
 	}
 
-	// 週間枠の消費%ぶんの弧。12時(-90度)を起点に時計回りへ掃く。tiny-skia に弧の基本図形が無いため、約2度刻みの折れ線を帯の太さへ太らせてリングにする。線端は角(Butt)で切って弧の長さを消費%ぴったりに合わせる。丸めると両端が帯の太さの半分ぶん膨らみ、実際より多い消費量に見えてしまう。
-	if let Some(w) = week {
-		let w = w.clamp(0.0, 100.0);
-		if w > 0.0 {
-			let sweep = w / 100.0 * std::f32::consts::TAU;
+	// 消費%ぶんの弧。
+	if let Some(v) = value {
+		let v = v.clamp(0.0, 100.0);
+		if v > 0.0 {
+			let sweep = v / 100.0 * std::f32::consts::TAU;
 			let start = -std::f32::consts::FRAC_PI_2;
 			let steps = ((sweep / (std::f32::consts::PI / 90.0)).ceil() as i32).max(1);
 			let mut ab = tiny_skia::PathBuilder::new();
@@ -878,12 +983,57 @@ fn render_gauge_rgba(size: u32, session: Option<f32>, week: Option<f32>) -> Vec<
 			if let Some(arc) = ab.finish() {
 				let mut paint = tiny_skia::Paint::default();
 				paint.anti_alias = true;
-				paint.set_color(gauge_color(w));
-				let stroke = tiny_skia::Stroke { width: thickness, line_cap: tiny_skia::LineCap::Butt, ..Default::default() };
+				paint.set_color(gauge_color(v));
 				pixmap.stroke_path(&arc, &paint, &stroke, tiny_skia::Transform::identity(), None);
 			}
 		}
 	}
+}
+
+
+
+
+
+
+
+
+
+
+// 指定の辺長(px)で、2本のリングゲージと中央の円ゲージを一枚に描き、ストレートアルファの RGBA バイト列を返す。最外周のリングは週間 Fable 枠(week_fable)、内側のリングは週間全モデル枠(week)の消費%を、それぞれ12時方向から時計回りの弧で表す。中央の円はセッション(5時間枠, session)の消費%を表し、ICON_CENTER_STYLE で下から上への塗り上げ(Fill)か扇形の円グラフ(Pie)かを選ぶ。値の無い枠は薄い灰のトラック・容器だけを残す。tiny-skia の画素は乗算済みアルファのため、CreateIcon が前提とするストレートアルファへ戻してから返す。
+fn render_gauge_rgba(size: u32, session: Option<f32>, week: Option<f32>, week_fable: Option<f32>) -> Vec<u8> {
+	let s = size as f32;
+	let mut pixmap = tiny_skia::Pixmap::new(size, size).expect("ゲージ用 Pixmap の確保に失敗しました");
+
+	let cx = s / 2.0;
+	let cy = s / 2.0;
+
+	// 外周リング(週間 Fable 枠)。余白を切り詰めて範囲一杯まで広げ、帯は控えめに細くして内側へ余地を残す。
+	let margin = (s * ICON_RING_MARGIN).max(0.5);
+	let outer = s / 2.0 - margin;
+	let thickness = (s * ICON_RING_THICKNESS).max(1.5);
+
+	// 内側リング(週間全モデル枠)。外周リングの内縁からリング間の隙間ぶん離す。ring2_outer は帯の外縁の半径。
+	let ring_gap = (s * ICON_RING_GAP).max(0.5);
+	let thickness2 = (s * ICON_RING2_THICKNESS).max(1.5);
+	let ring2_outer = outer - thickness - ring_gap;
+
+	// 中央の塗り上がり円。内側リングの内縁から少し離し、独立した円に見せる。
+	let gap = (s * ICON_INNER_GAP).max(0.5);
+	let inner_r = (ring2_outer - thickness2 - gap).max(1.0);
+
+	// タスクバーの地色から切り離すための下地円。最初に敷くことでゲージ一式の背後に回し、外周リングの外縁(outer)へ半径を合わせて全体を一つの円形へ収める。
+	let mut bb = tiny_skia::PathBuilder::new();
+	bb.push_circle(cx, cy, outer);
+	if let Some(backdrop) = bb.finish() {
+		let mut paint = tiny_skia::Paint::default();
+		paint.anti_alias = true;
+		paint.set_color(icon_color(ICON_BACKDROP_COLOR));
+		pixmap.fill_path(&backdrop, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+	}
+
+	// 外周リング(週間 Fable 枠)と内側リング(週間全モデル枠)。それぞれ帯の中央を通す半径を渡す。
+	draw_ring_gauge(&mut pixmap, cx, cy, outer - thickness / 2.0, thickness, week_fable);
+	draw_ring_gauge(&mut pixmap, cx, cy, ring2_outer - thickness2 / 2.0, thickness2, week);
 
 	// 中央の円の容器(全体)。空き部分が見えるよう薄い灰で塗る。
 	let mut cb = tiny_skia::PathBuilder::new();
@@ -892,7 +1042,7 @@ fn render_gauge_rgba(size: u32, session: Option<f32>, week: Option<f32>) -> Vec<
 	if let Some(circle) = inner_circle.as_ref() {
 		let mut paint = tiny_skia::Paint::default();
 		paint.anti_alias = true;
-		paint.set_color(track);
+		paint.set_color(icon_color(ICON_TRACK_COLOR));
 		pixmap.fill_path(circle, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
 	}
 
@@ -1285,15 +1435,15 @@ fn render_burndown_rgba(width: u32, height: u32, samples: &[(f32, f32)], proj: O
 
 
 
-// フロントエンドの自前タイトルバー左上へ、トレイと同じ消費率ゲージを描いて返す。指定の辺長(px)で render_gauge_rgba を呼び、ストレートアルファの RGBA バイト列をそのまま渡す。webview 側は受け取った画素を canvas へ putImageData し、タスクバーやトレイと寸分違わぬ図柄をタイトルバーへ出す。表示倍率に合う実画素数は webview が決めるため、寸法は引数で受け取る。両枠とも値が無いときは空を返し、webview にゲージを隠させる。
+// フロントエンドの自前タイトルバー左上へ、トレイと同じ消費率ゲージを描いて返す。指定の辺長(px)で render_gauge_rgba を呼び、ストレートアルファの RGBA バイト列をそのまま渡す。webview 側は受け取った画素を canvas へ putImageData し、タスクバーやトレイと寸分違わぬ図柄をタイトルバーへ出す。表示倍率に合う実画素数は webview が決めるため、寸法は引数で受け取る。どの枠も値が無いときは空を返し、webview にゲージを隠させる。
 #[cfg(windows)]
 #[tauri::command]
-fn gauge_icon_rgba(size: u32, session: Option<f32>, week: Option<f32>) -> Vec<u8> {
-	if session.is_none() && week.is_none() {
+fn gauge_icon_rgba(size: u32, session: Option<f32>, week: Option<f32>, week_fable: Option<f32>) -> Vec<u8> {
+	if session.is_none() && week.is_none() && week_fable.is_none() {
 		return Vec::new();
 	}
 	let size = size.clamp(1, 256);
-	render_gauge_rgba(size, session, week)
+	render_gauge_rgba(size, session, week, week_fable)
 }
 
 
@@ -1308,7 +1458,7 @@ fn gauge_icon_rgba(size: u32, session: Option<f32>, week: Option<f32>) -> Vec<u8
 // macOS などウィンドウ左上にアイコンを置かない文化のプラットフォームでは、ゲージ画素を返さず空にする。webview 側は空を受け取るとタイトルバーのゲージを隠す。
 #[cfg(not(windows))]
 #[tauri::command]
-fn gauge_icon_rgba(_size: u32, _session: Option<f32>, _week: Option<f32>) -> Vec<u8> {
+fn gauge_icon_rgba(_size: u32, _session: Option<f32>, _week: Option<f32>, _week_fable: Option<f32>) -> Vec<u8> {
 	Vec::new()
 }
 
@@ -1507,14 +1657,15 @@ fn update_tray_icon(app: &tauri::AppHandle, usage: &Usage) {
 		}
 	}
 
-	// ゲージ。バーンダウンを描けないときの退避も兼ねる。どちらの枠も無ければ既定アイコンのまま。
+	// ゲージ。バーンダウンを描けないときの退避も兼ねる。どの枠も無ければ既定アイコンのまま。
 	let session = usage.meters.get(METER_SESSION).map(|m| m.used_pct as f32);
 	let week = usage.meters.get(METER_WEEK_ALL).map(|m| m.used_pct as f32);
-	if session.is_none() && week.is_none() {
+	let week_fable = usage.meters.get(METER_WEEK_FABLE).map(|m| m.used_pct as f32);
+	if session.is_none() && week.is_none() && week_fable.is_none() {
 		return;
 	}
 	let size = tray_icon_px();
-	let rgba = render_gauge_rgba(size, session, week);
+	let rgba = render_gauge_rgba(size, session, week, week_fable);
 	if let Some(tray) = app.tray_by_id(TRAY_ID) {
 		let _ = tray.set_icon(Some(Image::new_owned(rgba, size, size)));
 	}
@@ -1529,17 +1680,18 @@ fn update_tray_icon(app: &tauri::AppHandle, usage: &Usage) {
 
 
 
-// 取得した利用枠を、トレイと同じゲージ図柄でウィンドウアイコンへも反映する。タスクバーのボタンや Alt+Tab のアイコンが、焼き込んだ固定値ではなく現在の消費率を表すようにする。効くのは窓を表示している間に限る。どちらの枠も取得できないときは既定のウィンドウアイコンのままにする。
+// 取得した利用枠を、トレイと同じゲージ図柄でウィンドウアイコンへも反映する。タスクバーのボタンや Alt+Tab のアイコンが、焼き込んだ固定値ではなく現在の消費率を表すようにする。効くのは窓を表示している間に限る。どの枠も取得できないときは既定のウィンドウアイコンのままにする。
 #[cfg(windows)]
 fn update_window_icon(app: &tauri::AppHandle, usage: &Usage) {
 	let session = usage.meters.get(METER_SESSION).map(|m| m.used_pct as f32);
 	let week = usage.meters.get(METER_WEEK_ALL).map(|m| m.used_pct as f32);
-	if session.is_none() && week.is_none() {
+	let week_fable = usage.meters.get(METER_WEEK_FABLE).map(|m| m.used_pct as f32);
+	if session.is_none() && week.is_none() && week_fable.is_none() {
 		return;
 	}
 	if let Some(window) = app.get_webview_window("main") {
 		let size = window_icon_px();
-		let rgba = render_gauge_rgba(size, session, week);
+		let rgba = render_gauge_rgba(size, session, week, week_fable);
 		let _ = window.set_icon(Image::new_owned(rgba, size, size));
 	}
 }
@@ -1805,6 +1957,7 @@ pub fn run() {
 		.invoke_handler(tauri::generate_handler![
 			get_usage,
 			get_history,
+			open_error_log,
 			set_tray_tooltip,
 			get_settings,
 			set_settings,

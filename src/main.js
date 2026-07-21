@@ -468,7 +468,7 @@ function render()
 // 直前にタイトルバーのゲージへ渡した寸法と消費率。同じなら再描画と IPC を省く。
 let lastTitlebarGaugeKey = null;
 
-// タイトルバー左上のゲージを、現在の消費率でトレイと同じ図柄へ更新する。実画素数は表示倍率に合わせて求め、Rust の render_gauge_rgba が返す RGBA を canvas へ putImageData する。両枠とも値が無いとき、または空が返るプラットフォーム(macOS 等)では隠す。
+// タイトルバー左上のゲージを、現在の消費率でトレイと同じ図柄へ更新する。実画素数は表示倍率に合わせて求め、Rust の render_gauge_rgba が返す RGBA を canvas へ putImageData する。どの枠も値が無いとき、または空が返るプラットフォーム(macOS 等)では隠す。
 async function updateTitlebarGauge()
 {
 	if (!titlebarGaugeEl)
@@ -477,7 +477,8 @@ async function updateTitlebarGauge()
 	const meters = state.usage ? state.usage.meters : null;
 	const session = meters && meters.session ? meters.session.used_pct : null;
 	const week = meters && meters.week_all ? meters.week_all.used_pct : null;
-	if (session == null && week == null)
+	const weekFable = meters && meters.week_fable ? meters.week_fable.used_pct : null;
+	if (session == null && week == null && weekFable == null)
 	{
 		titlebarGaugeEl.hidden = true;
 		lastTitlebarGaugeKey = null;
@@ -486,14 +487,14 @@ async function updateTitlebarGauge()
 
 	// CSS 上は 16px 角。表示倍率を掛けた実画素数で焼くことで、別 DPI でもぼけさせない。
 	const phys = Math.max(1, Math.round(16 * (window.devicePixelRatio || 1)));
-	const key = `${phys}|${session}|${week}`;
+	const key = `${phys}|${session}|${week}|${weekFable}`;
 	if (key === lastTitlebarGaugeKey)
 		return;
 
 	let rgba;
 	try
 	{
-		rgba = await invoke("gauge_icon_rgba", { size: phys, session, week });
+		rgba = await invoke("gauge_icon_rgba", { size: phys, session, week, weekFable });
 	}
 	catch (e)
 	{
@@ -1057,6 +1058,13 @@ function applyLanguage()
 	applyI18n(document, dict);
 	setLocale(dict);
 	document.documentElement.lang = locale;
+	// エラーログの説明に含まれるファイラー名を実行中 OS へ合わせる。Windows はエクスプローラー、macOS は Finder。applyI18n は {manager} を素通しするため、ここで差し替える。
+	const errorLogDesc = document.querySelector('[data-i18n="settings.errorlog.desc"]');
+	if (errorLogDesc)
+	{
+		const manager = t(isMac ? "settings.errorlog.finder" : "settings.errorlog.explorer");
+		errorLogDesc.textContent = t("settings.errorlog.desc", { manager });
+	}
 	// 選択肢名は applyI18n が入れ替えるため、その後でピッカーの表示(選択中ボタンの名前と各帯)を取り直す。
 	updateHeatCombo();
 	updatePaletteSubmenu();
@@ -1499,6 +1507,10 @@ function wireSettings()
 			// 登録・解除に失敗したら、トグルを実際の登録状態(変更前)へ戻す
 			event.target.checked = !enabled;
 		}
+	});
+
+	document.querySelector("#open-error-log").addEventListener("click", () => {
+		invoke("open_error_log").catch(() => {});
 	});
 }
 

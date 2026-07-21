@@ -212,30 +212,9 @@ export function parseResetTime(resetStr, now) {
 // 日付・時刻の表示形式。"intl" は英語の月名と午前午後("Jun 27, 2:40pm")、"jp" は数字主体の日本式("6/27 14:40")。
 let dateFormat = "intl";
 
-// チャート上のラベル語の日英対。表示言語(dateFormat)に合わせて localLabel で引く。
-const LABEL_WORDS = {
-	now: { jp: "現在", intl: "now" },
-	depleted: { jp: "枯渇", intl: "depleted" },
-};
-
 // 日付・時刻の表示形式を切り替える。以後の整形・描画がこの設定に従う。
 export function setDateFormat(mode) {
 	dateFormat = mode === "jp" ? "jp" : "intl";
-}
-
-
-
-
-
-
-
-
-
-
-// ラベル語を表示言語に合わせて返す。日本式は日本語、海外式は英語。
-function localLabel(key) {
-	const w = LABEL_WORDS[key];
-	return dateFormat === "jp" ? w.jp : w.intl;
 }
 
 
@@ -888,7 +867,7 @@ function drawBurndown(draw, view, redraw) {
 				} else {
 					el("circle", { cx: x(proj.hitT), cy: y(100), r: 4.5, fill: "var(--chart-warn)" }, g);
 					if (visible(proj.hitT) && visibleV(100)) {
-						placeLabel(svg, x(proj.hitT), y(100), localLabel("depleted") + " " + draw.fmt(proj.hitT), vbh - padB, { fill: "var(--chart-warn)", "font-size": 10.5, "font-weight": 600 }, placed, vbw);
+						placeLabel(svg, x(proj.hitT), y(100), t("chart.depleted") + " " + draw.fmt(proj.hitT), vbh - padB, { fill: "var(--chart-warn)", "font-size": 10.5, "font-weight": 600 }, placed, vbw);
 					}
 					const gap = Math.round((1 - proj.hitT) * draw.windowMin);
 					result = { state: "warn", label: t("verdict.earlyDepletion", { gap: formatGap(gap) }) };
@@ -906,14 +885,14 @@ function drawBurndown(draw, view, redraw) {
 		el("line", { x1: x(nowT), y1: padT, x2: x(nowT), y2: vbh - padB, stroke: "var(--chart-now)", "stroke-width": 1, "stroke-dasharray": "2 4", "stroke-opacity": ".45" }, g);
 		el("circle", { cx: x(nowT), cy: y(lastV), r: 4, fill: "var(--chart-now)" }, g);
 		if (visible(nowT) && visibleV(lastV)) {
-			placeLabel(svg, x(nowT), y(lastV), localLabel("now") + " " + lastV + "%", vbh - padB, { fill: "var(--chart-now)", "font-size": 11, "font-weight": 600 }, placed, vbw);
+			placeLabel(svg, x(nowT), y(lastV), t("chart.now") + " " + lastV + "%", vbh - padB, { fill: "var(--chart-now)", "font-size": 11, "font-weight": 600 }, placed, vbw);
 		}
 	} else {
 		txt(svg, padL + plotW / 2, padT + plotH / 2, t("chart.waitingSamples"), { fill: "var(--chart-faint)", "font-size": 12, "text-anchor": "middle" });
 	}
 
 	if (visible(1)) {
-		txt(svg, x(1) - 6, vbh - padB - 5, "reset " + draw.resetLabel, { fill: "var(--chart-sub)", "font-size": 10, "text-anchor": "end" });
+		txt(svg, x(1) - 6, vbh - padB - 5, t("chart.reset") + " " + draw.resetLabel, { fill: "var(--chart-sub)", "font-size": 10, "text-anchor": "end" });
 	}
 
 	attachZoom(svg, draw.mount, view, redraw, padL, plotW, padT, plotH, vbw, vbh);

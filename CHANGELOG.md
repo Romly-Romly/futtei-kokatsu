@@ -2,6 +2,13 @@
 
 > 🌐 **[日本語 →](CHANGELOG.ja.md)**
 
+## [1.4.0] - 2026-07-21
+
+- Added a "Weekly (Fable)" outer ring to the tray pie chart, giving it a three-layer structure: session, weekly (all models), and weekly (Fable).
+- Fixed the in-chart labels (now, depleted, reset) sometimes staying in English because they followed the date-format setting; they now follow the display-language setting.
+- macOS: Fixed an issue where launching from Finder or the Dock failed to find the `claude` command and could not fetch usage limits.
+- Made error logs viewable after the fact.
+
 ## [1.3.0] - 2026-07-19
 
 - Added support for the newly introduced "Current week (Fable)" usage limit, and reworked the layout to accommodate the extra panel.

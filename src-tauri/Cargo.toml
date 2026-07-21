@@ -1,6 +1,6 @@
 [package]
 name = "futtei-kokatsu"
-version = "1.3.0"
+version = "1.4.0"
 description = "Claude の利用量（週次・セッションの消費率）を見張る常駐ツール"
 authors = ["Romly"]
 license = "GPL-3.0-only"
