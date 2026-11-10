@@ -209,6 +209,68 @@ export function parseResetTime(resetStr, now) {
 
 
 
+// 同じ枠のリセット時刻とみなす隔たり。claude の /usage は同じ枠のリセット時刻を "6:59pm" と "7pm" のように1分ずらして返すことがあるため、この範囲の時刻は1つの枠にまとめる。
+const RESET_MERGE_MS = 3600 * 1000;
+
+// collectResets の結果を、履歴の配列ごとに利用枠キーで引く。履歴は取得のたびに新しい配列へ差し替わるため、同じ配列のうちは集め直さない。
+const RESET_CACHE = new WeakMap();
+
+// 履歴に記録された key の利用枠のリセット時刻(ミリ秒)を古い順に返す。RESET_MERGE_MS 以内の時刻は1つにまとめ、遅い方を採る。リセット文字列は年を持たないため、各サンプルの時刻を基準に解釈する。
+function collectResets(history, key) {
+	const all = new Set();
+	for (const s of history) {
+		const m = s[key];
+		if (!m || !m.resets) {
+			continue;
+		}
+		const when = parseResetTime(m.resets, new Date(s.ts));
+		if (when) {
+			all.add(when.getTime());
+		}
+	}
+	const merged = [];
+	for (const ms of [...all].sort((a, b) => a - b)) {
+		if (merged.length > 0 && ms - merged[merged.length - 1] <= RESET_MERGE_MS) {
+			merged[merged.length - 1] = ms;
+		} else {
+			merged.push(ms);
+		}
+	}
+	return merged;
+}
+
+
+
+
+
+
+
+
+
+
+// 履歴に記録された key の利用枠のうち、now までにリセットを迎えた過去の枠のリセット時刻(ミリ秒)を古い順に返す。
+export function pastWindowResets(history, key, now) {
+	let byKey = RESET_CACHE.get(history);
+	if (!byKey) {
+		byKey = new Map();
+		RESET_CACHE.set(history, byKey);
+	}
+	if (!byKey.has(key)) {
+		byKey.set(key, collectResets(history, key));
+	}
+	const nowMs = now.getTime();
+	return byKey.get(key).filter((ms) => ms <= nowMs);
+}
+
+
+
+
+
+
+
+
+
+
 // 日付・時刻の表示形式。"intl" は英語の月名と午前午後("Jun 27, 2:40pm")、"jp" は数字主体の日本式("6/27 14:40")。
 let dateFormat = "intl";
 
@@ -251,7 +313,7 @@ function formatClock(date, withSeconds) {
 
 
 // Date を短い日付文字列にする。日本式は "6/27"、海外式は "Jun 23"。
-function formatShortDate(date) {
+export function formatShortDate(date) {
 	if (dateFormat === "jp") {
 		return (date.getMonth() + 1) + "/" + date.getDate();
 	}
@@ -728,29 +790,33 @@ const MARKER_MIN_GAP = 8;
 
 
 
-// バーンダウンを SVG で描く。理想対角線・実績線・実測点・リセット壁・投影・now を重ね、判定(warn/ok/idle)を返す。表示範囲は view に従う。
-function drawBurndown(draw, view, redraw) {
+// バーンダウンを SVG で組み立てる。理想対角線・実績線・実測点・リセット壁・投影・now を重ねる。
+// draw.past が真の過去の枠では、投影と now の代わりに枠の結末(100% に達した点か、最終の使用%)を描く。
+// 組み立てた SVG・判定(warn/ok/idle)・ズーム操作の座標変換に要る余白と作画域の寸法を返す。
+// vbw/vbh は viewBox の寸法。表示範囲は view に従い、手動操作前なら view へデータ由来の既定範囲を書き込む。
+function buildBurndown(draw, view, vbw, vbh) {
 	const padL = 6;
 	const padR = 6;
 	const padT = 18;
 	const padB = 32;
-	// viewBox の寸法を mount の実測寸法へ合わせ、窓が広い・高いほど作画域を広げる。padL/padR/padT/padB は定数のまま据え置くので、作画域だけが伸び縮みし軸ラベルの余白は一定に保たれる。非表示などで実測できないときは代替値 VBW/VBH を使う。
-	const box = draw.mount.getBoundingClientRect();
-	const vbw = box.width >= 1 ? Math.round(box.width) : VBW;
-	const vbh = box.height >= 1 ? Math.round(box.height) : VBH;
+	// padL/padR/padT/padB は viewBox の寸法に依らない定数なので、viewBox が伸び縮みしても作画域だけが変わり、軸ラベルの余白は一定に保たれる。
 	const plotW = vbw - padL - padR;
 	const plotH = vbh - padT - padB;
 
 	const s = draw.samples;
 
-	// 投影は自動枠取りより先に求める。枠取りで投影点・帯の縦範囲まで取り込むため、座標変換 x()/y() を確定する前に計算する。
-	let proj = { mode: "none" };
+	// 最後の実測点の経過率と使用%。現在の枠では現在地にあたる。
 	let nowT = null;
 	let lastV = null;
 	if (s.length > 0) {
 		const last = s[s.length - 1];
 		nowT = last.t;
 		lastV = last.v;
+	}
+
+	// 投影は自動枠取りより先に求める。枠取りで投影点・帯の縦範囲まで取り込むため、座標変換 x()/y() を確定する前に計算する。過去の枠はリセットを迎え終えているため投影しない。
+	let proj = { mode: "none" };
+	if (s.length > 0 && !draw.past) {
 		proj = projectForward({
 			samples: s,
 			f: nowT,
@@ -850,42 +916,61 @@ function drawBurndown(draw, view, redraw) {
 			lastDotX = px;
 		}
 
-		result = { state: "idle", label: t("verdict.waitingProjection") };
-		if (proj.mode !== "none") {
-			const color = proj.warn ? "var(--chart-warn)" : "var(--chart-ok)";
-			if (proj.band) {
-				const band = proj.band.map((p) => x(p.t) + "," + y(p.v)).join(" ");
-				el("polygon", { points: band, fill: color, "fill-opacity": 0.13, stroke: "none" }, g);
-			}
-			const pts = proj.points.map((p) => x(p.t) + "," + y(p.v)).join(" ");
-			el("polyline", { points: pts, fill: "none", stroke: color, "stroke-width": 2.2, "stroke-dasharray": "5 4", "stroke-linecap": "round", "stroke-linejoin": "round" }, g);
-			if (proj.warn) {
-				if (lastV >= 100) {
-					// 現在地で既に使い切っている。枯渇マーカーは「現在」マーカーと同じ座標に重なるだけなので置かず、結果ラベルだけ超過量を伝える。超過が丸めて0なら「枠を使い切り」に落とす。
-					const over = Math.round(proj.projEnd - 100);
-					result = { state: "warn", label: over > 0 ? t("verdict.willExceed", { pct: over }) : t("verdict.windowUsedUp") };
-				} else {
-					el("circle", { cx: x(proj.hitT), cy: y(100), r: 4.5, fill: "var(--chart-warn)" }, g);
-					if (visible(proj.hitT) && visibleV(100)) {
-						placeLabel(svg, x(proj.hitT), y(100), t("chart.depleted") + " " + draw.fmt(proj.hitT), vbh - padB, { fill: "var(--chart-warn)", "font-size": 10.5, "font-weight": 600 }, placed, vbw);
-					}
-					const gap = Math.round((1 - proj.hitT) * draw.windowMin);
-					result = { state: "warn", label: t("verdict.earlyDepletion", { gap: formatGap(gap) }) };
+		if (draw.past) {
+			// 過去の枠は投影の代わりに結末を示す。100% に達していれば初めて 100% を観測した点に枯渇の印を置き、達していなければ最後の実測点に最終の使用%を添える。
+			const hit = s.find((p) => p.v >= 100);
+			if (hit) {
+				el("circle", { cx: x(hit.t), cy: y(100), r: 4.5, fill: "var(--chart-warn)" }, g);
+				if (visible(hit.t) && visibleV(100)) {
+					placeLabel(svg, x(hit.t), y(100), t("chart.depleted") + " " + draw.fmt(hit.t), vbh - padB, { fill: "var(--chart-warn)", "font-size": 10.5, "font-weight": 600 }, placed, vbw);
 				}
+				const gap = Math.round((1 - hit.t) * draw.windowMin);
+				result = { state: "warn", label: t("verdict.depletedBefore", { gap: formatGap(gap) }) };
 			} else {
-				const endV = proj.projEnd;
-				el("line", { x1: x(1) - 7, y1: y(endV), x2: x(1), y2: y(endV), stroke: "var(--chart-ok)", "stroke-width": 2 }, g);
-				el("line", { x1: x(1) - 7, y1: y(100), x2: x(1), y2: y(100), stroke: "var(--chart-ok)", "stroke-width": 2 }, g);
-				el("line", { x1: x(1) - 3.5, y1: y(endV), x2: x(1) - 3.5, y2: y(100), stroke: "var(--chart-ok)", "stroke-width": 2 }, g);
-				el("circle", { cx: x(1), cy: y(endV), r: 4, fill: "var(--chart-ok)" }, g);
-				result = { state: "ok", label: t("verdict.willHaveLeft", { pct: Math.round(100 - endV) }) };
+				el("circle", { cx: x(nowT), cy: y(lastV), r: 4, fill: "var(--chart-ok)" }, g);
+				if (visible(nowT) && visibleV(lastV)) {
+					placeLabel(svg, x(nowT), y(lastV), t("chart.final") + " " + lastV + "%", vbh - padB, { fill: "var(--chart-ok)", "font-size": 11, "font-weight": 600 }, placed, vbw);
+				}
+				result = { state: "ok", label: t("verdict.endedWithLeft", { pct: 100 - lastV }) };
 			}
-		}
+		} else {
+			result = { state: "idle", label: t("verdict.waitingProjection") };
+			if (proj.mode !== "none") {
+				const color = proj.warn ? "var(--chart-warn)" : "var(--chart-ok)";
+				if (proj.band) {
+					const band = proj.band.map((p) => x(p.t) + "," + y(p.v)).join(" ");
+					el("polygon", { points: band, fill: color, "fill-opacity": 0.13, stroke: "none" }, g);
+				}
+				const pts = proj.points.map((p) => x(p.t) + "," + y(p.v)).join(" ");
+				el("polyline", { points: pts, fill: "none", stroke: color, "stroke-width": 2.2, "stroke-dasharray": "5 4", "stroke-linecap": "round", "stroke-linejoin": "round" }, g);
+				if (proj.warn) {
+					if (lastV >= 100) {
+						// 現在地で既に使い切っている。枯渇マーカーは「現在」マーカーと同じ座標に重なるだけなので置かず、結果ラベルだけ超過量を伝える。超過が丸めて0なら「枠を使い切り」に落とす。
+						const over = Math.round(proj.projEnd - 100);
+						result = { state: "warn", label: over > 0 ? t("verdict.willExceed", { pct: over }) : t("verdict.windowUsedUp") };
+					} else {
+						el("circle", { cx: x(proj.hitT), cy: y(100), r: 4.5, fill: "var(--chart-warn)" }, g);
+						if (visible(proj.hitT) && visibleV(100)) {
+							placeLabel(svg, x(proj.hitT), y(100), t("chart.depleted") + " " + draw.fmt(proj.hitT), vbh - padB, { fill: "var(--chart-warn)", "font-size": 10.5, "font-weight": 600 }, placed, vbw);
+						}
+						const gap = Math.round((1 - proj.hitT) * draw.windowMin);
+						result = { state: "warn", label: t("verdict.earlyDepletion", { gap: formatGap(gap) }) };
+					}
+				} else {
+					const endV = proj.projEnd;
+					el("line", { x1: x(1) - 7, y1: y(endV), x2: x(1), y2: y(endV), stroke: "var(--chart-ok)", "stroke-width": 2 }, g);
+					el("line", { x1: x(1) - 7, y1: y(100), x2: x(1), y2: y(100), stroke: "var(--chart-ok)", "stroke-width": 2 }, g);
+					el("line", { x1: x(1) - 3.5, y1: y(endV), x2: x(1) - 3.5, y2: y(100), stroke: "var(--chart-ok)", "stroke-width": 2 }, g);
+					el("circle", { cx: x(1), cy: y(endV), r: 4, fill: "var(--chart-ok)" }, g);
+					result = { state: "ok", label: t("verdict.willHaveLeft", { pct: Math.round(100 - endV) }) };
+				}
+			}
 
-		el("line", { x1: x(nowT), y1: padT, x2: x(nowT), y2: vbh - padB, stroke: "var(--chart-now)", "stroke-width": 1, "stroke-dasharray": "2 4", "stroke-opacity": ".45" }, g);
-		el("circle", { cx: x(nowT), cy: y(lastV), r: 4, fill: "var(--chart-now)" }, g);
-		if (visible(nowT) && visibleV(lastV)) {
-			placeLabel(svg, x(nowT), y(lastV), t("chart.now") + " " + lastV + "%", vbh - padB, { fill: "var(--chart-now)", "font-size": 11, "font-weight": 600 }, placed, vbw);
+			el("line", { x1: x(nowT), y1: padT, x2: x(nowT), y2: vbh - padB, stroke: "var(--chart-now)", "stroke-width": 1, "stroke-dasharray": "2 4", "stroke-opacity": ".45" }, g);
+			el("circle", { cx: x(nowT), cy: y(lastV), r: 4, fill: "var(--chart-now)" }, g);
+			if (visible(nowT) && visibleV(lastV)) {
+				placeLabel(svg, x(nowT), y(lastV), t("chart.now") + " " + lastV + "%", vbh - padB, { fill: "var(--chart-now)", "font-size": 11, "font-weight": 600 }, placed, vbw);
+			}
 		}
 	} else {
 		txt(svg, padL + plotW / 2, padT + plotH / 2, t("chart.waitingSamples"), { fill: "var(--chart-faint)", "font-size": 12, "text-anchor": "middle" });
@@ -895,9 +980,7 @@ function drawBurndown(draw, view, redraw) {
 		txt(svg, x(1) - 6, vbh - padB - 5, t("chart.reset") + " " + draw.resetLabel, { fill: "var(--chart-sub)", "font-size": 10, "text-anchor": "end" });
 	}
 
-	attachZoom(svg, draw.mount, view, redraw, padL, plotW, padT, plotH, vbw, vbh);
-	draw.mount.replaceChildren(svg);
-	return result;
+	return { svg, result, padL, plotW, padT, plotH };
 }
 
 
@@ -909,12 +992,33 @@ function drawBurndown(draw, view, redraw) {
 
 
 
-// 1つの利用枠の投影付きバーンダウンを描く。履歴から現在の枠に入るサンプルを抽出し、経過率と使用%へ変換する。横方向ズームに対応する。
-export function renderUsageChart(mount, cfg) {
-	const reset = parseResetTime(cfg.resetStr, cfg.now);
+// バーンダウンを draw.mount へ描き、判定(warn/ok/idle)を返す。ズーム操作も付ける。
+// viewBox の寸法は mount の実測寸法に合わせるので、窓が広い・高いほど作画域が広がる。非表示などで実測できないときは代替値 VBW/VBH を使う。
+function drawBurndown(draw, view, redraw) {
+	const box = draw.mount.getBoundingClientRect();
+	const vbw = box.width >= 1 ? Math.round(box.width) : VBW;
+	const vbh = box.height >= 1 ? Math.round(box.height) : VBH;
+	const b = buildBurndown(draw, view, vbw, vbh);
+	attachZoom(b.svg, draw.mount, view, redraw, b.padL, b.plotW, b.padT, b.plotH, vbw, vbh);
+	draw.mount.replaceChildren(b.svg);
+	return b.result;
+}
+
+
+
+
+
+
+
+
+
+
+// 1つの利用枠のバーンダウンの描画材料を組み立てる。履歴から描く枠に入るサンプルを抽出し、経過率と使用%へ変換する。
+// 描く枠は、cfg.past が真なら cfg.resetMs にリセットを迎えた過去の枠、偽なら cfg.resetStr のリセット時刻の枠。cfg.resetStr を解釈できなければ null を返す。
+function prepareBurndown(cfg) {
+	const reset = cfg.past ? new Date(cfg.resetMs) : parseResetTime(cfg.resetStr, cfg.now);
 	if (!reset) {
-		mount.replaceChildren();
-		return { state: "idle", label: t("verdict.noResetTime") };
+		return null;
 	}
 	const resetMs = reset.getTime();
 	const startMs = resetMs - cfg.windowMs;
@@ -929,11 +1033,12 @@ export function renderUsageChart(mount, cfg) {
 		return cfg.timeLabel === "date" ? formatDateTime(at) : formatClock(at);
 	};
 
-	const profile = cfg.windowMs >= PROFILE_MIN_WINDOW_MS ? buildProfile(cfg.history, cfg.key) : null;
+	// 消費プロファイルは投影にだけ使うため、投影しない過去の枠では作らない。
+	const profile = !cfg.past && cfg.windowMs >= PROFILE_MIN_WINDOW_MS ? buildProfile(cfg.history, cfg.key) : null;
 
-	const draw = {
-		mount,
-		id: cfg.key,
+	return {
+		// 表示範囲(VIEWS)とクリップの識別子。過去の枠は現在の枠や他の過去の枠とズーム状態を分けるため、リセット時刻を添える。
+		id: cfg.past ? `${cfg.key}-${resetMs}` : cfg.key,
 		samples,
 		fmt,
 		resetLabel: cfg.timeLabel === "date" ? formatShortDate(reset) : formatClock(reset),
@@ -942,11 +1047,51 @@ export function renderUsageChart(mount, cfg) {
 		startMs,
 		span,
 		profile,
-		fullView: cfg.fullView === true,
+		past: cfg.past === true,
+		// 過去の枠は枠全体の推移を見るものなので、後半の自動枠取り(右上へのズーム)を効かせない。
+		fullView: cfg.fullView === true || cfg.past === true,
 	};
-	const view = getView(cfg.key);
+}
+
+
+
+
+
+
+
+
+
+
+// 1つの利用枠のバーンダウンを mount へ描き、判定を返す。ズーム操作に対応する。描く枠の指定は prepareBurndown の cfg に従う。
+export function renderUsageChart(mount, cfg) {
+	const draw = prepareBurndown(cfg);
+	if (!draw) {
+		mount.replaceChildren();
+		return { state: "idle", label: t("verdict.noResetTime") };
+	}
+	draw.mount = mount;
+	const view = getView(draw.id);
 	const redraw = () => drawBurndown(draw, view, redraw);
 	return drawBurndown(draw, view, redraw);
+}
+
+
+
+
+
+
+
+
+
+
+// 1つの利用枠のバーンダウンを、画面と同じ表示範囲のまま width×height の viewBox で SVG に組み立てて返す。画面のズーム状態は書き換えない。
+// 色は CSS 変数を参照したままで、ズーム操作は付かない。リセット時刻を解釈できなければ null を返す。
+export function buildUsageChartSvg(cfg, width, height) {
+	const draw = prepareBurndown(cfg);
+	if (!draw) {
+		return null;
+	}
+	return buildBurndown(draw, Object.assign({}, getView(draw.id)), width, height).svg;
 }
 
 

@@ -49,8 +49,20 @@ xattr -dr com.apple.quarantine /Applications/Futtei-Kokatsu.app
 Launch it and leave it in the tray. It fetches automatically every 10 minutes (and once right after launch), so the meters and charts fill in on their own. As long as `claude -p "/usage"` returns your usage, there is nothing to configure.
 
 - Charts zoom horizontally with the wheel, vertically with Ctrl+wheel, and pan by dragging. Double-click to return to the full view.
+- On the weekly charts, the < > buttons at the top left show past weeks. Hiding the window to the tray returns to the current week.
+- Charts can be copied, saved, or shared as images. Right-click a chart and choose from **Share**, or click the share button in the title bar.
 - Closing the window does not quit the app; it hides to the tray. To quit completely, choose **Quit** from the tray icon.
-- Settings (theme, display language, date format, trend visibility, launch at login) live inside the gear icon.
+- Settings live inside the gear icon.
+
+
+
+### Sharing charts
+
+From the right-click menu, you can share either that chart alone or all usage-limit charts combined into one image. The share button in the title bar shares the combined image.
+
+Choosing X, Threads, or Misskey copies the image to the clipboard and opens a post window, with the text already filled in, in your default browser. Paste the image in the post window. The app never posts anything by itself. Choosing **Share with other apps** hands the image to the OS share feature.
+
+To post to Misskey, enter your server (e.g. `misskey.io`) under **Misskey server** in the settings.
 
 
 

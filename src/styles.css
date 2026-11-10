@@ -48,6 +48,8 @@
 	--heat-hour-fontsize: 0.5rem;
 	/* 消費傾向(ヒートマップ)カードの高さの上限。窓を高くするとセルがこの高さまで伸びて止まり、これを超えるぶんの縦余白はバーンダウン側へ回る。 */
 	--trend-max-height: 280px;
+	/* グラフを画像へ書き出す時に敷く地色。画面は地を透過してシステム背景(Mica/Acrylic)を透かすが、画像には透かす先が無いため、Mica に近い不透明な色を敷く。Light/Dark で明暗を入れ替える(下のメディアクエリで上書き)。 */
+	--export-bg: #f3f3f3;
 }
 
 * {
@@ -66,7 +68,7 @@ body {
 	cursor: default;
 }
 
-/* OS 標準のタイトルバーを外したぶん、ウィンドウ上端へ自前のタイトルバーを置く。地は透過のまま(Mica が透ける)。左がドラッグ領域、右にキャプションボタン(最小化・最大化・閉じる)を並べる。 */
+/* OS 標準のタイトルバーを外したぶん、ウィンドウ上端へ自前のタイトルバーを置く。地は透過のまま(Mica が透ける)。左がドラッグ領域、右に共有ボタンとキャプションボタン(最小化・最大化・閉じる)を並べる。 */
 .titlebar {
 	flex-shrink: 0;
 	height: 32px;
@@ -146,6 +148,36 @@ body {
 .tb-close:hover {
 	background-color: #c42b1c;
 	color: #ffffff;
+}
+
+/* タイトルバー右上の共有ボタン。Windows ではキャプションボタンと同じ寸法で並べる。共有の字形はキャプションの字形より細かいため、一回り大きく出す。共有メニューを開いている間はホバーと同じ面を敷く。 */
+.tb-share .tb-ico {
+	font-size: 13px;
+}
+
+.tb-share[aria-expanded="true"] {
+	background-color: rgba(0, 0, 0, 0.06);
+}
+
+/* 共有ボタンのアイコンは、Windows では Segoe の字形(.tb-ico-win)、macOS では SVG(.tb-ico-mac)を出す。 */
+.tb-ico-mac {
+	display: none;
+}
+
+.is-mac .tb-ico-win {
+	display: none;
+}
+
+.is-mac .tb-ico-mac {
+	display: block;
+}
+
+/* macOS ではキャプションボタンが並ばず共有ボタンが右端に来るため、ツールバーのボタンに倣って小さめの角丸にし、窓の端から離す。 */
+.is-mac .tb-share {
+	width: 30px;
+	height: 24px;
+	margin: 4px 8px 4px 0;
+	border-radius: 6px;
 }
 
 /* macOS では OS の信号機ボタン(閉じる・最小化・最大化)を左上へ重ねて表示する(tauri.macos.conf.json の titleBarStyle: Overlay)。自前のキャプションボタンは重複するため隠す。 */
@@ -321,6 +353,25 @@ body {
 /* 帯入りのカラーパレット選択ドロップダウン。素の select では option へ帯を載せられないため自前で組む。閉じた時のボタンに選択中の名前と帯を出し、開くとリストへ各パレットの名前と帯が並ぶ。 */
 .combo {
 	position: relative;
+}
+
+/* 設定の文字の入力欄(Misskey のサーバー)。見た目はコンボボックスの開閉ボタンに揃える。UI 全体で禁じている文字の選択を、入力欄では戻す。 */
+.text-input {
+	width: 176px;
+	padding: 0.4em 0.7em;
+	border: 1px solid rgba(0, 0, 0, 0.14);
+	border-radius: 8px;
+	background-color: #ffffff;
+	color: #0f0f0f;
+	font-family: inherit;
+	font-size: 0.8rem;
+	-webkit-user-select: text;
+	user-select: text;
+	cursor: text;
+}
+
+.text-input::placeholder {
+	color: #9a9aa2;
 }
 
 .combo-trigger {
@@ -504,7 +555,7 @@ body {
 	color: #8a8a8a;
 }
 
-/* 配色を選ぶフライアウト。親項目の右脇へ隙間なく接して開き、地・枠・影はメインのメニューへ揃える。右がはみ出す時は main.js が .flip-left を付けて左脇へ回す。 */
+/* サブメニューのフライアウト(配色・共有)。親項目の右脇へ隙間なく接して開き、地・枠・影はメインのメニューへ揃える。右がはみ出す時は main.js が .flip-left を付けて左脇へ回す。 */
 .ctx-submenu {
 	position: absolute;
 	left: 100%;
@@ -659,7 +710,7 @@ button:disabled {
 	opacity: 0.5;
 }
 
-/* タイトルバー右端の状態行。ドラッグ領域の末尾へ auto マージンで寄せ、キャプションボタンの直左に置く。ビューを問わず常に出るため、設定画面でも最終更新が見える。窓が狭い時に詰まるのはアプリ名ではなくこちらで、まず件数(.status-count)を丸ごと落とし、それでも入らなければ省略記号にする(落とす判断は fitStatus が幅を測って行う)。 */
+/* タイトルバー右端の状態行。ドラッグ領域の末尾へ auto マージンで寄せ、共有ボタンの直左に置く。ビューを問わず常に出るため、設定画面でも最終更新が見える。窓が狭い時に詰まるのはアプリ名ではなくこちらで、まず件数(.status-count)を丸ごと落とし、それでも入らなければ省略記号にする(落とす判断は fitStatus が幅を測って行う)。 */
 .status {
 	margin: 0 0 0 auto;
 	padding: 0 12px;
@@ -684,6 +735,30 @@ button:disabled {
 	color: #c0392b;
 	background-color: rgba(192, 57, 43, 0.08);
 	border: 1px solid rgba(192, 57, 43, 0.25);
+}
+
+/* 操作の結果を短く知らせる通知。ウィンドウ下端の中央に浮かべ、右クリックメニューと同じすりガラスの地にする。操作の邪魔にならないよう、ポインタの操作は素通しにする。 */
+.toast {
+	position: fixed;
+	left: 50%;
+	bottom: 16px;
+	z-index: 1100;
+	max-width: calc(100% - 32px);
+	padding: 7px 14px;
+	border: 1px solid rgba(0, 0, 0, 0.12);
+	border-radius: 8px;
+	font-size: 0.82rem;
+	color: #0f0f0f;
+	background-color: rgba(255, 255, 255, 0.92);
+	-webkit-backdrop-filter: blur(24px) saturate(180%);
+	backdrop-filter: blur(24px) saturate(180%);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+	transform: translateX(-50%);
+	pointer-events: none;
+}
+
+.toast.error {
+	color: #c0392b;
 }
 
 .panels {
@@ -871,6 +946,49 @@ button:disabled {
 	color: #777777;
 }
 
+/* バーンダウンに描く枠を1つ前・1つ後へ切り替える操作と、描いている期間の表示。判定(.verdict)と左右で対になるよう、グラフ上端の線より上の余白の左端へ置き、縦の中心を判定の文字の中心に揃える。ドラッグ操作を受けるグラフの SVG より手前に重ねて、押せるようにする。ボタンを左にまとめ、期間の文字の長さが変わってもボタンの位置が動かないようにする。 */
+.chart-nav {
+	position: absolute;
+	top: 0;
+	left: 6px;
+	z-index: 1;
+	height: 16px;
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	font-size: 0.72rem;
+	line-height: 1;
+	color: var(--chart-sub);
+}
+
+/* display:flex が hidden 属性の display:none を打ち消すため、隠す指定を明示する。 */
+.chart-nav[hidden] {
+	display: none;
+}
+
+.chart-nav-btn {
+	width: 18px;
+	height: 16px;
+	padding: 0;
+	border: none;
+	border-radius: 4px;
+	background-color: transparent;
+	font-size: 0.95rem;
+	line-height: 1;
+	color: inherit;
+}
+
+.chart-nav-btn:hover:not(:disabled),
+.chart-nav-btn:active:not(:disabled) {
+	background-color: rgba(0, 0, 0, 0.06);
+}
+
+.chart-nav-label {
+	margin-left: 4px;
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+
 /* バーンダウンの差込先。SVG を絶対配置で敷き詰める起点にする。SVG は viewBox 由来の固有アスペクト比を持つため、通常配置のまま height:100% を与えると SVG 自身の固有高さが最小コンテンツ高として効き、描画のたびに直前の高さが下限へ焼き付いて縦が縮まなくなる。SVG をレイアウトの寸法計算から外し、この箱の高さは flex だけで決める。 */
 .chart {
 	flex: 1;
@@ -1015,6 +1133,7 @@ button:disabled {
 		--chart-wall: #5a5a66;
 		--chart-now: #ffffff;
 		--heat-empty: rgba(255, 255, 255, 0.05);
+		--export-bg: #202020;
 	}
 
 	/* 暗色ではつまみを明るい半透明にして暗い地に馴染ませる。 */
@@ -1056,6 +1175,10 @@ button:disabled {
 		color: #ffffff;
 	}
 
+	.tb-share[aria-expanded="true"] {
+		background-color: rgba(255, 255, 255, 0.08);
+	}
+
 	.status {
 		color: #a0a0a0;
 	}
@@ -1064,6 +1187,17 @@ button:disabled {
 		color: #ff6b5e;
 		background-color: rgba(255, 107, 94, 0.1);
 		border-color: rgba(255, 107, 94, 0.3);
+	}
+
+	.toast {
+		color: #f6f6f6;
+		background-color: rgba(40, 40, 40, 0.92);
+		border-color: rgba(255, 255, 255, 0.12);
+		box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+	}
+
+	.toast.error {
+		color: #ff6b5e;
 	}
 
 	.meter-track {
@@ -1108,6 +1242,11 @@ button:disabled {
 		color: #a0a0a0;
 	}
 
+	.chart-nav-btn:hover:not(:disabled),
+	.chart-nav-btn:active:not(:disabled) {
+		background-color: rgba(255, 255, 255, 0.08);
+	}
+
 	.card {
 		border-color: #33333b;
 		background-color: #2b2b2b;
@@ -1134,6 +1273,16 @@ button:disabled {
 		background-color: #2b2b2b;
 		color: #f6f6f6;
 		border-color: rgba(255, 255, 255, 0.14);
+	}
+
+	.text-input {
+		background-color: #2b2b2b;
+		color: #f6f6f6;
+		border-color: rgba(255, 255, 255, 0.14);
+	}
+
+	.text-input::placeholder {
+		color: #6f6f7a;
 	}
 
 	.combo-list {

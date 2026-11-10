@@ -1,6 +1,6 @@
 [package]
 name = "futtei-kokatsu"
-version = "1.4.0"
+version = "1.5.0"
 description = "Claude の利用量（週次・セッションの消費率）を見張る常駐ツール"
 authors = ["Romly"]
 license = "GPL-3.0-only"
@@ -26,6 +26,12 @@ regex = "1"
 tiny-skia = "0.11"
 # トレイのバーンダウン描画で、claude が返すリセット時刻の壁時計表記(現地時間)を絶対時刻へ解釈するために使う。壁時計の年月日時分から現地タイムゾーンでの Unix 時刻を得るには現地オフセットの解決が要り、これを clock フィーチャの Local が担う。
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# グラフの画像を保存する時の保存ダイアログ。Windows・macOS とも OS 標準のダイアログを Rust 側から開くため、フロントへダイアログの権限を渡さずに済む。
+rfd = "0.17"
+# SNS の投稿画面を既定のブラウザで開くために使う。Windows・macOS とも OS の既定の開き方に任せる。
+open = "5"
+# SNS の投稿画面の URL へ本文を入れる時と、共有する本文をヘッダで受け取る時のパーセントエンコードに使う。
+percent-encoding = "2"
 
 # ウィンドウ配置の永続化、システムバックドロップとアクセント色、自作タイトルバーのウィンドウ操作を担う共通クレート。正本は別リポジトリにあり、ここへは git subtree で内包している。ビルド番号の判定とアクセント色のレジストリ読みもこのクレートが引き受ける。
 romly-tauri-common = { path = "External/romly-tauri-common" }
@@ -33,10 +39,24 @@ romly-tauri-common = { path = "External/romly-tauri-common" }
 # トレイの小アイコン寸法を現在の DPI から測るために Win32 を直接呼ぶ。tray-icon が使う版に合わせて windows-sys のバージョン重複を避ける。
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi"] }
+# グラフの画像をクリップボードへ置くために使う。所有者のウィンドウを指定してクリップボードを開ける。
+clipboard-win = "5"
+# グラフの画像を Windows の共有 UI で共有するために、WinRT の DataTransferManager を呼ぶ。tauri が使う版に合わせて windows のバージョン重複を避ける。
+windows = { version = "0.61", features = ["ApplicationModel_DataTransfer", "Foundation", "Storage", "Storage_Streams", "Win32_Foundation", "Win32_UI_Shell"] }
+# 共有 UI へ渡すファイルの一覧(IIterable)を Vec から作るために使う。windows はこのクレートの型を再公開していない。
+windows-collections = "0.2"
+
+# グラフの画像をクリップボードへ置くために使う。Windows では所有者のウィンドウを指定してクリップボードを開く必要があり、所有者無しで開く arboard は使えないため、Windows 以外に限る。
+[target.'cfg(not(windows))'.dependencies]
+arboard = "3"
 
 # macOS では透過ウィンドウ(transparent: true)の実現に private API が要るため、macos-private-api フィーチャを macOS 標的にのみ足す。Windows のビルドには含めない。tauri.macos.conf.json の app.macOSPrivateApi と対で機能する。
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { version = "2", features = ["macos-private-api"] }
+# グラフの画像を macOS の共有メニュー(NSSharingServicePicker)で共有するために AppKit を呼ぶ。tauri が使う版に合わせて重複を避ける。
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSString", "NSURL", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSSharingService", "NSView"] }
 
 # 二重起動を防ぎ、二個目の起動を一個目のウィンドウ復帰へ変えるプラグイン。デスクトップ専用のためモバイル標的を除いて依存させる。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

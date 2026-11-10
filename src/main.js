@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Romly
 
-import { renderUsageChart, parseResetTime, paceMetrics, renderHeatmap, setDateFormat, setHeatPalette, setLocale, heatPaletteOptions, heatGradientCss, formatDateTime } from "./chart.js";
+import { renderUsageChart, buildUsageChartSvg, parseResetTime, pastWindowResets, paceMetrics, renderHeatmap, setDateFormat, setHeatPalette, setLocale, heatPaletteOptions, heatGradientCss, formatDateTime, formatShortDate } from "./chart.js";
 import { resolveLocale, buildDict, applyI18n, translate } from "./i18n.js";
+import { renderCardsPng } from "./snapshot.js";
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -10,11 +11,11 @@ const { listen } = window.__TAURI__.event;
 // 実行中プラットフォームが macOS か。ショートカットの表記(Ctrl↔⌘)や、ネイティブメニューと重複するキー処理の抑制に使う。
 const isMac = navigator.userAgent.includes("Macintosh");
 
-// 既知の利用枠の定義表。key は get_usage の meters と履歴の各行のフィールド名に対応し、表示の並び順もこの順に従う。windowMs は枠の窓長、timeLabel はバーンダウンの時間軸の表記。セッション枠は5時間と短くチャートが最小サイズでも全体が読めるため、fullView で後半の自動枠取り(右上へのズーム)を効かせず常に全体表示にする。表示名は meter.<key>.label / meter.<key>.short の辞書キーで引く。この表に無い枠がデータへ現れたときは meterDefs が週次と同じ扱いで末尾へ足す。
+// 既知の利用枠の定義表。key は get_usage の meters と履歴の各行のフィールド名に対応し、表示の並び順もこの順に従う。windowMs は枠の窓長、timeLabel はバーンダウンの時間軸の表記。セッション枠は5時間と短くチャートが最小サイズでも全体が読めるため、fullView で後半の自動枠取り(右上へのズーム)を効かせず常に全体表示にする。browsePast は、バーンダウンに過去の枠を1つずつ辿る操作を出すか。セッション枠は過去の枠が1日に何個も溜まり、1つずつ辿る操作に向かないため出さない。表示名は meter.<key>.label / meter.<key>.short の辞書キーで引く。この表に無い枠がデータへ現れたときは meterDefs が週次と同じ扱いで末尾へ足す。
 const KNOWN_METERS = [
 	{ key: "session", windowMs: 5 * 3600 * 1000, timeLabel: "time", fullView: true },
-	{ key: "week_all", windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date" },
-	{ key: "week_fable", windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date" },
+	{ key: "week_all", windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date", browsePast: true },
+	{ key: "week_fable", windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date", browsePast: true },
 ];
 
 // 現在の表示言語の辞書。applyLanguage が言語設定から組み立てて差し替える。JS で組み立てる文言はこの辞書を通して訳す。applyLanguage が走る前の既定言語として日本語を入れておく。
@@ -74,8 +75,11 @@ const reduceMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 // 設定ウィンドウで操作する設定値。Rust の settings.json と同じ形をそのまま保持する。
 let settings = null;
 
-// 各利用枠のパネル一式(パネル要素・枠名・メーター見出し・メーター本体・チャート・判定バッジ)を利用枠キーで引く。syncPanels が組み立てて管理し、renderMeters と renderCharts がここへ描き込む。
+// 各利用枠のパネル一式(パネル要素・枠名・メーター見出し・メーター本体・チャート・判定バッジ・過去の枠を辿る操作)を利用枠キーで引く。syncPanels が組み立てて管理し、renderMeters と renderCharts がここへ描き込む。
 const meterMounts = {};
+
+// 利用枠キーごとに、バーンダウンに表示している過去の枠のリセット時刻(ミリ秒)。キーの無い枠は現在の枠を表示する。
+const shownPastReset = {};
 
 // 直前にトレイへ送ったツールチップ文字列。同じ内容なら IPC を省いて毎秒の無駄打ちを抑える。
 let lastTooltip = null;
@@ -261,7 +265,7 @@ function meterDefs()
 			defs.push(d);
 	}
 	for (const key of [...present].sort())
-		defs.push({ key, windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date" });
+		defs.push({ key, windowMs: 7 * 24 * 3600 * 1000, timeLabel: "date", browsePast: true });
 
 	return defs;
 }
@@ -603,7 +607,49 @@ async function applyUsage(usage)
 
 
 
-// 蓄積した時系列から各利用枠のバーンダウンを描き、判定バッジを更新する。対象の枠と描き方は meterDefs の定義に従う。
+// 利用枠のバーンダウンの描画設定を組み立てる。過去の枠を表示中の枠はその枠の設定を返す。現在の枠を表示中で、リセット時刻の文字列がまだ得られていない枠は null を返す。
+function chartConfigFor(def, now)
+{
+	const pastReset = shownPastReset[def.key];
+	if (pastReset != null)
+	{
+		return {
+			history: state.history,
+			key: def.key,
+			past: true,
+			resetMs: pastReset,
+			windowMs: def.windowMs,
+			now,
+			timeLabel: def.timeLabel,
+			fullView: def.fullView,
+		};
+	}
+
+	const resetStr = resetStringFor(def.key);
+	if (!resetStr)
+		return null;
+
+	return {
+		history: state.history,
+		key: def.key,
+		resetStr,
+		windowMs: def.windowMs,
+		now,
+		timeLabel: def.timeLabel,
+		fullView: def.fullView,
+	};
+}
+
+
+
+
+
+
+
+
+
+
+// 蓄積した時系列から各利用枠のバーンダウンを描き、判定バッジと過去の枠を辿る操作を更新する。対象の枠と描き方は meterDefs の定義に従う。
 function renderCharts()
 {
 	const now = new Date();
@@ -613,32 +659,129 @@ function renderCharts()
 		if (!slot)
 			continue;
 
-		const resetStr = resetStringFor(def.key);
-		if (!resetStr)
+		if (slot.nav)
+			syncChartNav(def, slot, now);
+
+		const cfg = chartConfigFor(def, now);
+		if (!cfg)
 		{
 			slot.chart.replaceChildren();
 			setBadge(slot.verdict, { state: "idle", label: "" });
 			continue;
 		}
-		const verdict = renderUsageChart(slot.chart, {
-			history: state.history,
-			key: def.key,
-			resetStr,
-			windowMs: def.windowMs,
-			now,
-			timeLabel: def.timeLabel,
-			fullView: def.fullView,
-		});
-		setBadge(slot.verdict, verdict);
+		setBadge(slot.verdict, renderUsageChart(slot.chart, cfg));
 	}
 }
 
 
 
 
-// 1枠分のパネル DOM を組み立てて meterMounts 用の一式を返す。枠名の文言は言語に依存するため、ここでは入れず syncPanels が毎回当てる。
-function createPanel(key)
+
+
+
+
+
+
+// key の利用枠のバーンダウンに表示している枠の、resets(pastWindowResets の結果)の中の位置を返す。現在の枠を表示しているか、表示している過去の枠が resets に無ければ resets.length を返す。
+function shownWindowIndex(key, resets)
 {
+	const at = resets.indexOf(shownPastReset[key]);
+	if (at < 0)
+		return resets.length;
+	else
+		return at;
+}
+
+
+
+
+
+
+
+
+
+
+// 過去の枠を辿る操作の表示を、def の利用枠の履歴と表示中の枠に合わせる。
+// 表示中の過去の枠が履歴に無ければ、現在の枠の表示へ戻す。辿れる過去の枠が1つも無ければ、操作ごと隠す。
+function syncChartNav(def, slot, now)
+{
+	const resets = pastWindowResets(state.history, def.key, now);
+	const at = shownWindowIndex(def.key, resets);
+	if (at === resets.length)
+		delete shownPastReset[def.key];
+
+	slot.nav.hidden = resets.length === 0;
+	slot.navPrev.disabled = at === 0;
+	slot.navNext.disabled = at === resets.length;
+	if (at === resets.length)
+	{
+		slot.navLabel.textContent = t("chart.nav.current");
+	}
+	else
+	{
+		const from = formatShortDate(new Date(resets[at] - def.windowMs));
+		const to = formatShortDate(new Date(resets[at]));
+		slot.navLabel.textContent = t("chart.nav.range", { from, to });
+	}
+}
+
+
+
+
+
+
+
+
+
+
+// def の利用枠のバーンダウンに表示する枠を、step が -1 なら1つ前、1 なら1つ後の枠へ切り替えて描き直す。最も古い過去の枠より前と、現在の枠より後へは移らない。
+function stepChartWindow(def, step)
+{
+	const resets = pastWindowResets(state.history, def.key, new Date());
+	const at = shownWindowIndex(def.key, resets) + step;
+	if (at < 0 || at > resets.length)
+		return;
+
+	if (at === resets.length)
+		delete shownPastReset[def.key];
+	else
+		shownPastReset[def.key] = resets[at];
+
+	renderCharts();
+}
+
+
+
+
+
+
+
+
+
+
+// 過去の枠を表示しているバーンダウンを、すべて現在の枠の表示へ戻して描き直す。過去の枠を表示している枠が無ければ何もしない。
+function showCurrentWindows()
+{
+	const keys = Object.keys(shownPastReset);
+	if (keys.length === 0)
+		return;
+
+	for (const key of keys)
+	{
+		delete shownPastReset[key];
+	}
+
+	renderCharts();
+}
+
+
+
+
+// 1枠分のパネル DOM を組み立てて meterMounts 用の一式を返す。枠名とボタンのヒントの文言は言語に依存するため、ここでは入れず syncPanels が毎回当てる。
+// def.browsePast が真の枠には、バーンダウンに描く枠を1つ前・1つ後へ切り替える操作を付ける。偽の枠では一式の nav・navPrev・navNext・navLabel を null にする。
+function createPanel(def)
+{
+	const key = def.key;
 	const panel = document.createElement("figure");
 	panel.id = `panel-${key}`;
 	panel.className = "panel";
@@ -662,13 +805,37 @@ function createPanel(key)
 	chart.className = "chart";
 	wrap.append(verdict, chart);
 
+	let nav = null;
+	let navPrev = null;
+	let navNext = null;
+	let navLabel = null;
+	if (def.browsePast)
+	{
+		nav = document.createElement("div");
+		nav.className = "chart-nav";
+		navPrev = document.createElement("button");
+		navPrev.type = "button";
+		navPrev.className = "chart-nav-btn";
+		navPrev.textContent = "‹";
+		navPrev.addEventListener("click", () => stepChartWindow(def, -1));
+		navNext = document.createElement("button");
+		navNext.type = "button";
+		navNext.className = "chart-nav-btn";
+		navNext.textContent = "›";
+		navNext.addEventListener("click", () => stepChartWindow(def, 1));
+		navLabel = document.createElement("span");
+		navLabel.className = "chart-nav-label";
+		nav.append(navPrev, navNext, navLabel);
+		wrap.append(nav);
+	}
+
 	panel.append(cap, mount, wrap);
 
 	// 生成したチャートも寸法変化に追従して描き直せるよう監視へ加える。
 	if (chartResizeObserver)
 		chartResizeObserver.observe(chart);
 
-	return { panel, name, head, mount, chart, verdict };
+	return { panel, name, head, mount, chart, verdict, nav, navPrev, navNext, navLabel };
 }
 
 
@@ -699,7 +866,7 @@ function syncPanels(defs)
 		for (const def of defs)
 		{
 			if (!meterMounts[def.key])
-				meterMounts[def.key] = createPanel(def.key);
+				meterMounts[def.key] = createPanel(def);
 			panelsEl.appendChild(meterMounts[def.key].panel);
 		}
 
@@ -713,6 +880,13 @@ function syncPanels(defs)
 		const slot = meterMounts[def.key];
 		slot.name.textContent = meterLabelFor(def.key, "label");
 		slot.chart.title = t("chart.zoomHint");
+		if (slot.nav)
+		{
+			slot.navPrev.title = t("chart.nav.prev");
+			slot.navPrev.setAttribute("aria-label", t("chart.nav.prev"));
+			slot.navNext.title = t("chart.nav.next");
+			slot.navNext.setAttribute("aria-label", t("chart.nav.next"));
+		}
 	}
 }
 
@@ -993,7 +1167,7 @@ async function initSettings()
 	}
 	catch (e)
 	{
-		settings = { theme: "system", language: "system", show_trend: true, date_format: "intl", heat_palette: "standard", tray_style: "burndown-session", hide_on_blur: false };
+		settings = { theme: "system", language: "system", show_trend: true, date_format: "intl", heat_palette: "standard", tray_style: "burndown-session", hide_on_blur: false, misskey_host: "" };
 	}
 
 	const legacy = localStorage.getItem("dateFormat");
@@ -1034,6 +1208,10 @@ function applySettingsToUi()
 	trendSectionEl.hidden = !settings.show_trend;
 	document.querySelector("#trend-toggle").checked = !!settings.show_trend;
 	document.querySelector("#blur-hide-toggle").checked = !!settings.hide_on_blur;
+	for (const hostSetting of Object.values(SHARE_HOST_SETTINGS))
+	{
+		document.querySelector(hostSetting.input).value = settings[hostSetting.key] || "";
+	}
 	setSegmentedActive("#theme-seg", settings.theme);
 	setSegmentedActive("#lang-seg", settings.language);
 	setSegmentedActive("#datefmt-seg", settings.date_format);
@@ -1496,6 +1674,16 @@ function wireSettings()
 		saveSettings();
 	});
 
+	// 投稿画面を開くサーバーは、入力を確定した時(フォーカスを外した時・Enter)に保存する。前後の空白だけを落とし、URL の形の入力もそのまま持つ(ホスト名の取り出しは Rust の share_host が行う)。
+	for (const hostSetting of Object.values(SHARE_HOST_SETTINGS))
+	{
+		document.querySelector(hostSetting.input).addEventListener("change", (event) => {
+			settings[hostSetting.key] = event.target.value.trim();
+			event.target.value = settings[hostSetting.key];
+			saveSettings();
+		});
+	}
+
 	document.querySelector("#autostart-toggle").addEventListener("change", async (event) => {
 		const enabled = event.target.checked;
 		try
@@ -1606,9 +1794,265 @@ function wireTitlebar()
 
 
 
-// 右クリックメニューの各項目に対応する動作を起こす。更新・設定・消費傾向の切替はフロントの既存処理をそのまま呼び、ウィンドウを閉じる/終了は Rust コマンドへ回す。閉じる(win_close)は CloseRequested 経由でトレイへ隠して計測を続け、終了(quit_app)は配置を保存してプロセスを終える。
-function runMenuAction(action)
+// 通知を消すタイマー。続けて通知した時は前のタイマーを取り消し、新しい通知の表示時間を確保する。
+let toastTimer = null;
+
+// 操作の結果をウィンドウ下端の通知で短く知らせる。isError が真なら失敗の配色にし、読み切れるよう長めに出す。durationMs を渡すと、その時間だけ出す。
+function showToast(text, isError, durationMs)
 {
+	const toast = document.querySelector("#toast");
+	toast.textContent = text;
+	toast.classList.toggle("error", isError === true);
+	toast.hidden = false;
+	clearTimeout(toastTimer);
+	toastTimer = setTimeout(() => {
+		toast.hidden = true;
+	}, durationMs || (isError ? 6000 : 2500));
+}
+
+
+
+
+
+
+
+
+
+
+// 要素が属するグラフを返す。利用枠パネルならその枠キー、消費傾向カードなら "heat"、どのグラフにも属さなければ null を返す。
+function chartTargetAt(node)
+{
+	if (!(node instanceof Element))
+		return null;
+
+	const panel = node.closest(".panel");
+	if (panel)
+	{
+		for (const key of Object.keys(meterMounts))
+		{
+			if (meterMounts[key].panel === panel)
+				return key;
+		}
+	}
+	if (trendSectionEl.contains(node))
+		return "heat";
+
+	return null;
+}
+
+
+
+
+
+
+
+
+
+
+// 画像に描くカードの記述(snapshot.js の renderCardsPng が受け取る形)を組み立てる。
+// target が利用枠キーならそのパネル、"heat" なら消費傾向カードの1枚だけを返す。null なら利用枠パネルをすべて、画面と同じ順に返す。
+function exportCards(target)
+{
+	if (target === "heat")
+		return [{ kind: "heat", wide: true, el: trendSectionEl.querySelector(".chart-card") }];
+
+	const now = new Date();
+	const cards = [];
+	for (const def of meterDefs())
+	{
+		const slot = meterMounts[def.key];
+		if (!slot || (target !== null && target !== def.key))
+			continue;
+
+		const cfg = chartConfigFor(def, now);
+		cards.push({
+			kind: "usage",
+			// 画面の2列表示と同じく、セッションは全幅の1段目に置く。
+			wide: def.key === "session",
+			slot,
+			// 過去の枠を表示している時は、どの週のグラフかが画像だけで分かるよう、画面の期間の表示も描かせる。
+			showPeriod: shownPastReset[def.key] != null,
+			buildChart: (width, height) => (cfg ? buildUsageChartSvg(cfg, width, height) : null),
+		});
+	}
+
+	return cards;
+}
+
+
+
+
+
+
+
+
+
+
+// 書き出す画像の既定のファイル名を作る。対象のグラフと今の日時を入れ、続けて書き出しても名前が重ならないようにする。
+// ファイル名は invoke のヘッダで Rust へ渡す。ヘッダの値に使えない文字を避けるため、英数字・ハイフン・下線以外の文字は下線へ置き換える。
+function exportFileName(target)
+{
+	const now = new Date();
+	const pad = (n) => String(n).padStart(2, "0");
+	const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+	const subject = (target || "all").replace(/[^\w-]/g, "_");
+	return `FutteiKokatsu-${subject}-${stamp}.png`;
+}
+
+
+
+
+
+
+
+
+
+
+// target のグラフ(null ならすべての利用枠パネル)をカードの PNG 画像にして、そのバイト列を返す。画像の下端には、アプリ名とバージョン、表示中のデータの時点を添える。
+async function renderExportPng(target)
+{
+	const version = document.querySelector("#titlebar-version").textContent;
+	const shown = displayUsage();
+	const footer = {
+		left: version ? `${t("app.name")} ${version}` : t("app.name"),
+		right: shown.at ? t("export.asOf", { time: formatDateTime(shown.at) }) : "",
+	};
+	return renderCardsPng(exportCards(target), footer);
+}
+
+
+
+
+
+
+
+
+
+
+// 右クリックメニューからの画像の書き出し。target のグラフ(null ならすべての利用枠パネル)をカードの画像にし、copy が真ならクリップボードへ、偽なら保存ダイアログで選ばれたファイルへ書き出す。結果は通知で知らせる。
+async function exportImage(target, copy)
+{
+	try
+	{
+		const png = await renderExportPng(target);
+		if (copy)
+		{
+			await invoke("copy_image", png);
+			showToast(t("export.copied"));
+		}
+		else if (await invoke("save_image", png, { headers: { "x-file-name": exportFileName(target) } }))
+		{
+			showToast(t("export.saved"));
+		}
+	}
+	catch (e)
+	{
+		showToast(t("export.failed", { error: typeof e === "string" ? e : String(e) }), true);
+	}
+}
+
+
+
+
+
+
+
+
+
+
+// 共有する本文を作る。target の利用枠(null ならすべての利用枠)の使用率を「枠名 使用%」の形で並べ、アプリ名のハッシュタグを添える。使用率を持たない消費傾向("heat")はハッシュタグだけにする。
+function shareText(target)
+{
+	const usage = displayUsage().usage;
+	const parts = [];
+	for (const def of meterDefs())
+	{
+		if (target !== null && target !== def.key)
+			continue;
+
+		const meter = usage ? usage.meters[def.key] : null;
+		if (meter)
+			parts.push(`${meterLabelFor(def.key, "short")} ${meter.used_pct}%`);
+	}
+	return t("share.text", { summary: parts.join(" / "), hashtag: t("share.hashtag") }).trim();
+}
+
+
+
+
+
+
+
+
+
+
+// 投稿画面を開くサーバーを設定で持つ共有先。key は設定の項目名、input は設定画面の入力欄、name は案内の文言に出す名前。
+const SHARE_HOST_SETTINGS = {
+	misskey: { key: "misskey_host", input: "#misskey-host", name: "Misskey" },
+};
+
+// 共有の結果を知らせる通知のうち、貼り付けの案内を出しておく時間(ミリ秒)。ブラウザへ移ってから戻っても読めるよう、他の通知より長くする。
+const PASTE_HINT_DURATION_MS = 10000;
+
+// target のグラフ(null ならすべての利用枠パネル)の画像を、service の共有先へ渡す。
+// service が "system" なら OS の共有シートへ画像ごと渡す。macOS では共有メニューを anchor({x, y, width, height}、ビューポート基準の CSS ピクセル)の下に出す。
+// それ以外は SNS の投稿画面で、投稿画面へは URL で画像を渡せないため、画像をクリップボードへコピーしてから本文入りの投稿画面を既定のブラウザで開き、貼り付けの操作を通知で案内する。
+// 投稿画面を開くサーバーが要る共有先でサーバーが未設定なら、共有せずに設定画面の入力欄へ案内する。
+async function shareImage(service, target, anchor)
+{
+	const hostSetting = SHARE_HOST_SETTINGS[service];
+	const host = hostSetting ? (settings && settings[hostSetting.key]) || "" : null;
+	if (hostSetting && !host.trim())
+	{
+		showSettings();
+		document.querySelector(hostSetting.input).focus();
+		showToast(t("share.hostMissing", { service: hostSetting.name }), true);
+		return;
+	}
+
+	try
+	{
+		const png = await renderExportPng(target);
+		const text = shareText(target);
+		if (service === "system")
+		{
+			// ヘッダの値には ASCII しか使えないため、日本語を含む題名と本文はパーセントエンコードして渡す。
+			const headers = {
+				"x-file-name": exportFileName(target),
+				"x-share-title": encodeURIComponent(t("app.name")),
+				"x-share-text": encodeURIComponent(text),
+				"x-anchor": [anchor.x, anchor.y, anchor.width, anchor.height].map((v) => Math.round(v)).join(","),
+			};
+			await invoke("share_image", png, { headers });
+		}
+		else
+		{
+			await invoke("copy_image", png);
+			await invoke("open_share_page", { service, host, text });
+			showToast(t("share.pasteHint", { keys: isMac ? "⌘V" : "Ctrl+V" }), false, PASTE_HINT_DURATION_MS);
+		}
+	}
+	catch (e)
+	{
+		showToast(t("share.failed", { error: typeof e === "string" ? e : String(e) }), true);
+	}
+}
+
+
+
+
+
+
+
+
+
+
+// 右クリックメニューの各項目に対応する動作を起こす。context は右クリックした位置({x, y}、ビューポート基準の CSS ピクセル)とそこにあるグラフ(target、chartTargetAt の値)で、「このグラフ」の画像の書き出し・共有の対象と、共有メニューを開く位置に使う。
+// 更新・設定・消費傾向の切替はフロントの既存処理をそのまま呼び、ウィンドウを閉じる/終了は Rust コマンドへ回す。閉じる(win_close)は CloseRequested 経由でトレイへ隠して計測を続け、終了(quit_app)は配置を保存してプロセスを終える。
+function runMenuAction(action, context)
+{
+	const target = context.target;
+	const point = { x: context.x, y: context.y, width: 0, height: 0 };
 	switch (action)
 	{
 		case "refresh":
@@ -1621,6 +2065,24 @@ function runMenuAction(action)
 			if (settings)
 				setShowTrend(!settings.show_trend);
 			break;
+		case "copy-chart":
+			exportImage(target, true);
+			break;
+		case "save-chart":
+			exportImage(target, false);
+			break;
+		case "share-chart":
+			openShareMenu(target, point, null);
+			break;
+		case "copy-all":
+			exportImage(null, true);
+			break;
+		case "save-all":
+			exportImage(null, false);
+			break;
+		case "share-all":
+			openShareMenu(null, point, null);
+			break;
 		case "close":
 			invoke("win_close");
 			break;
@@ -1629,6 +2091,73 @@ function runMenuAction(action)
 			break;
 	}
 }
+
+
+
+
+// ポップアップメニュー(右クリックメニュー・共有メニュー)を、ビューポート基準の CSS ピクセルの (x, y) に置いて表示する。alignRight が偽なら x をメニューの左端、真なら右端として置く。
+// ビューポートからはみ出す分だけ内側へ寄せる。寸法は表示してからでないと測れないため、先に (x, y) へ置いてから表示し、旧位置での一瞬のちらつきを避ける。
+function placeMenu(menu, x, y, alignRight)
+{
+	const margin = 6;
+	menu.style.left = `${x}px`;
+	menu.style.top = `${y}px`;
+	menu.hidden = false;
+	const rect = menu.getBoundingClientRect();
+	let left = alignRight ? x - rect.width : x;
+	let top = y;
+	if (left + rect.width + margin > window.innerWidth)
+		left = window.innerWidth - rect.width - margin;
+	if (top + rect.height + margin > window.innerHeight)
+		top = window.innerHeight - rect.height - margin;
+	menu.style.left = `${Math.max(margin, left)}px`;
+	menu.style.top = `${Math.max(margin, top)}px`;
+}
+
+
+
+
+
+
+
+
+
+
+// ポップアップメニュー(右クリックメニュー・共有メニュー・フライアウト)の container が直接持つ、表示中の選択肢を返す。入れ子のフライアウトの中の選択肢は、そのフライアウトのものとして除く。
+function menuOptions(container)
+{
+	return Array.from(container.querySelectorAll(".ctx-item, .ctx-palette"))
+		.filter((item) => !item.hidden && item.closest(".ctx-submenu, .context-menu") === container);
+}
+
+
+
+
+
+
+
+
+
+
+// ポップアップメニューの上下キーの処理。container の選択肢(menuOptions)のうち、焦点のある選択肢から step(1 なら下、-1 なら上)へ1つ進んだ選択肢へ焦点を移し、端では止める。どの選択肢にも焦点が無ければ、下なら先頭、上なら末尾へ移す。
+function moveMenuFocus(container, step)
+{
+	const list = menuOptions(container);
+	if (list.length === 0)
+		return;
+
+	const at = list.indexOf(document.activeElement);
+	if (at < 0)
+		list[step > 0 ? 0 : list.length - 1].focus();
+	else
+		list[Math.max(0, Math.min(list.length - 1, at + step))].focus();
+}
+
+
+
+
+
+
 
 
 
@@ -1662,54 +2191,58 @@ function wireContextMenu()
 	applyMenuShortcutLabels();
 	buildPaletteSubmenu();
 
-	const items = () => Array.from(menu.querySelectorAll(".ctx-item"));
+	// 右クリックした位置(ビューポート基準の CSS ピクセル)と、そこにあるグラフ(chartTargetAt の値)。「このグラフ」の画像の書き出し・共有の対象と、共有メニューを開く位置に使う。
+	let menuContext = { target: null, x: 0, y: 0 };
 
-	const focusItem = (i) => {
-		const list = items();
-		if (list[i])
-			list[i].focus();
+	// サブメニュー(配色・共有)の組。親項目(.ctx-has-sub)とフライアウト(.ctx-submenu)を同じ包み(.ctx-sub)に置き、フライアウトは親項目の脇へ絶対配置で開く。
+	const subs = Array.from(menu.querySelectorAll(".ctx-sub")).map((wrap) => ({
+		wrap,
+		parent: wrap.querySelector(".ctx-has-sub"),
+		panel: wrap.querySelector(".ctx-submenu"),
+	}));
+
+	const closeSub = (sub, focusParent) => {
+		if (sub.panel.hidden)
+			return;
+		sub.panel.hidden = true;
+		sub.panel.classList.remove("flip-left");
+		sub.parent.setAttribute("aria-expanded", "false");
+		if (focusParent)
+			sub.parent.focus();
 	};
 
-	// 配色フライアウトの要素。フライアウトは親項目(.ctx-sub 内)の脇へ絶対配置で開く。
-	const sub = menu.querySelector("#palette-submenu");
-	const paletteItem = menu.querySelector('[data-action="palette"]');
-	const subWrap = paletteItem ? paletteItem.closest(".ctx-sub") : null;
-	const subOptions = () => (sub ? Array.from(sub.querySelectorAll(".ctx-palette")) : []);
-
-	const closeSub = (focusParent) => {
-		if (!sub || sub.hidden)
-			return;
-		sub.hidden = true;
-		sub.classList.remove("flip-left");
-		if (paletteItem)
-			paletteItem.setAttribute("aria-expanded", "false");
-		if (focusParent && paletteItem)
-			paletteItem.focus();
+	const closeAllSubs = () => {
+		for (const sub of subs)
+		{
+			closeSub(sub, false);
+		}
 	};
 
-	const openSub = () => {
-		if (!sub || !paletteItem)
-			return;
-		// 選択中の配色と各帯を今の設定・テーマへ合わせてから開く。
-		updatePaletteSubmenu();
-		sub.classList.remove("flip-left");
-		sub.style.top = "-5px";
-		sub.hidden = false;
-		paletteItem.setAttribute("aria-expanded", "true");
+	// フライアウトを開く。同時に開くのは1つだけにするため、他のフライアウトは畳む。
+	const openSub = (sub) => {
+		for (const other of subs)
+		{
+			if (other !== sub)
+				closeSub(other, false);
+		}
+		sub.panel.classList.remove("flip-left");
+		sub.panel.style.top = "-5px";
+		sub.panel.hidden = false;
+		sub.parent.setAttribute("aria-expanded", "true");
 		// 表示してから寸法を測り、右がはみ出すなら左脇へ回し、下がはみ出す分だけ上へ寄せる。
 		const margin = 6;
-		const itemRect = paletteItem.getBoundingClientRect();
-		const subRect = sub.getBoundingClientRect();
+		const itemRect = sub.parent.getBoundingClientRect();
+		const subRect = sub.panel.getBoundingClientRect();
 		if (itemRect.right + subRect.width + margin > window.innerWidth)
-			sub.classList.add("flip-left");
+			sub.panel.classList.add("flip-left");
 		const overflowY = subRect.bottom + margin - window.innerHeight;
 		if (overflowY > 0)
-			sub.style.top = `${-5 - overflowY}px`;
+			sub.panel.style.top = `${-5 - overflowY}px`;
 	};
 
-	// フライアウト内へ焦点を移す。選択中の配色があればそこへ、無ければ先頭へ移す。
-	const focusSubOption = () => {
-		const opts = subOptions();
+	// フライアウト内へ焦点を移す。選択中の選択肢(配色)があればそこへ、無ければ先頭へ移す。
+	const focusSubOption = (sub) => {
+		const opts = menuOptions(sub.panel);
 		if (opts.length === 0)
 			return;
 		const checked = opts.find((o) => o.getAttribute("aria-checked") === "true");
@@ -1719,7 +2252,7 @@ function wireContextMenu()
 	const closeMenu = () => {
 		if (menu.hidden)
 			return;
-		closeSub(false);
+		closeAllSubs();
 		menu.hidden = true;
 	};
 
@@ -1728,39 +2261,36 @@ function wireContextMenu()
 		const trendItem = menu.querySelector('[data-action="trend"]');
 		if (trendItem)
 			trendItem.setAttribute("aria-checked", settings && settings.show_trend ? "true" : "false");
-		// 前回の残りが無いようフライアウトは畳んだ状態で開き、選択中の配色と帯を今の設定へ合わせる。
-		closeSub(false);
+		// 前回の残りが無いようフライアウトは畳んだ状態で開き、配色のフライアウトの選択中の配色と帯を今の設定・テーマへ合わせる。
+		closeAllSubs();
 		updatePaletteSubmenu();
 
-		// クリック位置へ置いてから表示し、寸法を測ってビューポートからはみ出す分だけ内側へ寄せる。先に位置を当てることで、旧位置での一瞬のちらつきを避ける。
-		const margin = 6;
-		menu.style.left = `${x}px`;
-		menu.style.top = `${y}px`;
-		menu.hidden = false;
-		const rect = menu.getBoundingClientRect();
-		let left = x;
-		let top = y;
-		if (left + rect.width + margin > window.innerWidth)
-			left = window.innerWidth - rect.width - margin;
-		if (top + rect.height + margin > window.innerHeight)
-			top = window.innerHeight - rect.height - margin;
-		menu.style.left = `${Math.max(margin, left)}px`;
-		menu.style.top = `${Math.max(margin, top)}px`;
+		placeMenu(menu, x, y, false);
 
 		// キーボード操作の受け皿としてコンテナへ focus を移す。項目へ直接移さないことで、右クリックで開いた直後に項目へ枠が付くのを避ける。
 		menu.focus();
 	};
 
 	// 右クリック(・メニューキー)で既定のメニューを止め、自前メニューを開く。dev・release とも自前メニューへ置き換える。
+	// ただし文字の入力欄の上では、切り取り・コピー・貼り付けのできる既定のメニューを残す。
+	// 共有のフライアウトの「このグラフ」の項目とその区切り線は、グラフの上で開いた時だけ見せる。寸法を測る openMenuAt より先に出し分ける。
 	window.addEventListener("contextmenu", (event) => {
+		if (event.target instanceof Element && event.target.closest("input, textarea"))
+			return;
+
 		event.preventDefault();
+		menuContext = { target: chartTargetAt(event.target), x: event.clientX, y: event.clientY };
+		for (const item of menu.querySelectorAll('[data-scope="chart"]'))
+		{
+			item.hidden = menuContext.target === null;
+		}
 		openMenuAt(event.clientX, event.clientY);
 	});
 
-	// 項目を選んだらメニューを閉じて対応する動作を起こす。配色フライアウトの選択肢はメニュー全体を閉じて配色を適用し、配色の親項目はメニューを閉じずにフライアウトの開閉を切り替える。
+	// 選択肢を選んだらメニューを閉じて対応する動作を起こす。配色の選択肢はメニュー全体を閉じて配色を適用する。サブメニューの親項目はメニューを閉じずに、そのフライアウトの開閉を切り替える。フライアウトの中の項目(.ctx-item)は、メニュー直下の項目と同じく runMenuAction へ回す。
 	menu.addEventListener("click", (event) => {
 		const paletteOpt = event.target.closest(".ctx-palette");
-		if (paletteOpt && sub && sub.contains(paletteOpt))
+		if (paletteOpt && menu.contains(paletteOpt))
 		{
 			closeMenu();
 			choosePalette(paletteOpt.dataset.value);
@@ -1769,63 +2299,58 @@ function wireContextMenu()
 		const item = event.target.closest(".ctx-item");
 		if (!item || !menu.contains(item))
 			return;
-		if (item === paletteItem)
+		const sub = subs.find((s) => s.parent === item);
+		if (sub)
 		{
-			if (sub && sub.hidden)
+			if (sub.panel.hidden)
 			{
-				openSub();
-				focusSubOption();
+				openSub(sub);
+				focusSubOption(sub);
 			}
 			else
 			{
-				closeSub(true);
+				closeSub(sub, true);
 			}
 			return;
 		}
 		closeMenu();
-		runMenuAction(item.dataset.action);
+		runMenuAction(item.dataset.action, menuContext);
 	});
 
-	// カーソルを親項目へ合わせるとフライアウトを開き、包み(親項目とフライアウト)から外れると閉じる。フライアウトは包みの子のため、親項目からフライアウトへ移る間に閉じることはない。
-	if (paletteItem && subWrap)
+	for (const sub of subs)
 	{
-		paletteItem.addEventListener("mouseenter", openSub);
-		subWrap.addEventListener("mouseleave", () => closeSub(false));
+		// カーソルを親項目へ合わせるとフライアウトを開き、包み(親項目とフライアウト)から外れると閉じる。フライアウトは包みの子のため、親項目からフライアウトへ移る間に閉じることはない。
+		sub.parent.addEventListener("mouseenter", () => openSub(sub));
+		sub.wrap.addEventListener("mouseleave", () => closeSub(sub, false));
 		// 親項目で右キーを押すとフライアウトへ入る。上下での項目移動(menu の keydown)へ渡さないよう、ここで奪う。
-		paletteItem.addEventListener("keydown", (event) => {
+		sub.parent.addEventListener("keydown", (event) => {
 			if (event.key === "ArrowRight")
 			{
 				event.preventDefault();
 				event.stopPropagation();
-				openSub();
-				focusSubOption();
+				openSub(sub);
+				focusSubOption(sub);
 			}
 		});
-	}
-
-	// フライアウト内のキーボード操作。上下で選択肢を辿り、左キー・Esc で親項目へ戻る。ここで拾ったキーは menu の keydown へ渡さない。Enter/Space は選択肢(button)の既定動作(click)へ任せる。
-	if (sub)
-	{
-		sub.addEventListener("keydown", (event) => {
-			const opts = subOptions();
-			const at = opts.indexOf(document.activeElement);
+		// フライアウト内のキーボード操作。上下で選択肢を辿り、左キー・Esc で親項目へ戻る。ここで拾ったキーは menu の keydown へ渡さない。Enter/Space は選択肢(button)の既定動作(click)へ任せる。
+		sub.panel.addEventListener("keydown", (event) => {
 			if (event.key === "Escape" || event.key === "ArrowLeft")
 			{
 				event.preventDefault();
 				event.stopPropagation();
-				closeSub(true);
+				closeSub(sub, true);
 			}
 			else if (event.key === "ArrowDown")
 			{
 				event.preventDefault();
 				event.stopPropagation();
-				(opts[at < 0 ? 0 : Math.min(opts.length - 1, at + 1)] || opts[0]).focus();
+				moveMenuFocus(sub.panel, 1);
 			}
 			else if (event.key === "ArrowUp")
 			{
 				event.preventDefault();
 				event.stopPropagation();
-				(opts[at < 0 ? opts.length - 1 : Math.max(0, at - 1)] || opts[opts.length - 1]).focus();
+				moveMenuFocus(sub.panel, -1);
 			}
 		});
 	}
@@ -1841,8 +2366,6 @@ function wireContextMenu()
 	document.querySelector(".window-body").addEventListener("scroll", closeMenu, true);
 
 	menu.addEventListener("keydown", (event) => {
-		const list = items();
-		const at = list.indexOf(document.activeElement);
 		if (event.key === "Escape")
 		{
 			closeMenu();
@@ -1850,12 +2373,12 @@ function wireContextMenu()
 		else if (event.key === "ArrowDown")
 		{
 			event.preventDefault();
-			focusItem(at < 0 ? 0 : Math.min(list.length - 1, at + 1));
+			moveMenuFocus(menu, 1);
 		}
 		else if (event.key === "ArrowUp")
 		{
 			event.preventDefault();
-			focusItem(at < 0 ? list.length - 1 : Math.max(0, at - 1));
+			moveMenuFocus(menu, -1);
 		}
 		// Enter/Space は項目(button)の既定動作(click)へ任せる。
 	});
@@ -1864,7 +2387,108 @@ function wireContextMenu()
 
 
 
-// release ビルドでのみ、WebView2 のリロード・devtools 起動キーを封じてネイティブアプリらしくする。F5・Ctrl+R によるリロードと、F12 などの devtools 起動キーを抑止する。右クリックの既定メニューは wireContextMenu が dev・release とも自前メニューへ置き換えるためここでは扱わない。dev ビルドではキー操作は調査の妨げになるため抑止しない。
+
+
+
+
+
+
+// 共有メニューで選んだ共有先へ渡す、共有するグラフ(null ならすべての利用枠パネル)と、OS の共有シートを出す位置。openShareMenu が開くたびに入れ替える。
+let shareRequest = { target: null, anchor: { x: 0, y: 0, width: 0, height: 0 } };
+
+// 共有メニューを開く。target は共有するグラフ(null ならすべての利用枠パネル)。メニューは anchor({x, y, width, height}、ビューポート基準の CSS ピクセル)の下端に沿って置く。
+// button を渡すとそのボタンから開いたものとして、anchor の右端にメニューの右端を揃え、ボタンの aria-expanded を立てる。
+function openShareMenu(target, anchor, button)
+{
+	const menu = document.querySelector("#share-menu");
+	shareRequest = { target, anchor };
+	if (button)
+	{
+		placeMenu(menu, anchor.x + anchor.width, anchor.y + anchor.height, true);
+		button.setAttribute("aria-expanded", "true");
+	}
+	else
+	{
+		placeMenu(menu, anchor.x, anchor.y + anchor.height, false);
+	}
+	// キーボード操作の受け皿としてコンテナへ focus を移す。右クリックメニューと同じく、開いた直後に項目へ枠が付くのを避ける。
+	menu.focus();
+}
+
+
+
+
+
+
+
+
+
+
+// 共有メニューと、それを開くタイトルバーの共有ボタンを配線する。ボタンは、すべての利用枠パネルを対象に、ボタンの下へメニューを開閉する。
+// 項目を選ぶとメニューを閉じて shareImage を呼ぶ。外側の押下・Esc・スクロール・リサイズ・フォーカス喪失で閉じ、上下キーで項目を辿れるようにする。
+function wireShareMenu()
+{
+	const menu = document.querySelector("#share-menu");
+	const button = document.querySelector("#tb-share");
+
+	const closeMenu = () => {
+		if (menu.hidden)
+			return;
+		menu.hidden = true;
+		button.setAttribute("aria-expanded", "false");
+	};
+
+	button.addEventListener("click", () => {
+		if (!menu.hidden)
+		{
+			closeMenu();
+			return;
+		}
+		const rect = button.getBoundingClientRect();
+		openShareMenu(null, { x: rect.left, y: rect.top, width: rect.width, height: rect.height }, button);
+	});
+
+	menu.addEventListener("click", (event) => {
+		const item = event.target.closest(".ctx-item");
+		if (!item || !menu.contains(item))
+			return;
+		closeMenu();
+		shareImage(item.dataset.share, shareRequest.target, shareRequest.anchor);
+	});
+
+	// メニュー外の押下で閉じる。共有ボタンの押下は、ボタンの click での開閉に任せるため除く。
+	document.addEventListener("mousedown", (event) => {
+		if (!menu.hidden && !menu.contains(event.target) && !button.contains(event.target))
+			closeMenu();
+	});
+	// 窓のフォーカス喪失・リサイズ・本体のスクロールでは位置がずれるため閉じる。
+	window.addEventListener("blur", closeMenu);
+	window.addEventListener("resize", closeMenu);
+	document.querySelector(".window-body").addEventListener("scroll", closeMenu, true);
+
+	menu.addEventListener("keydown", (event) => {
+		if (event.key === "Escape")
+		{
+			closeMenu();
+		}
+		else if (event.key === "ArrowDown")
+		{
+			event.preventDefault();
+			moveMenuFocus(menu, 1);
+		}
+		else if (event.key === "ArrowUp")
+		{
+			event.preventDefault();
+			moveMenuFocus(menu, -1);
+		}
+		// Enter/Space は項目(button)の既定動作(click)へ任せる。
+	});
+}
+
+
+
+
+// release ビルドでのみ、WebView2 のリロード・devtools 起動キーを封じてネイティブアプリらしくする。F5・Ctrl+R によるリロードと、F12 などの devtools 起動キーを抑止する。右クリックの既定メニューは wireContextMenu が扱うためここでは扱わない。dev ビルドではキー操作は調査の妨げになるため抑止しない。
 function suppressWebChrome()
 {
 	if (!import.meta.env.PROD)
@@ -2017,6 +2641,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
 	wireTitlebar();
 	wireContextMenu();
+	wireShareMenu();
 	wireSettings();
 	initSettings();
 
@@ -2025,6 +2650,11 @@ window.addEventListener("DOMContentLoaded", () => {
 	});
 	listen("open-settings", () => {
 		showSettings();
+	});
+	// 窓がトレイへ畳まれた合図。トレイから開いた時は見出しのメーターと同じく現在の枠を見せるため、過去の枠を表示していたバーンダウンを現在の枠へ戻す。
+	// 開いた時ではなく畳んだ時に戻すのは、窓が出た瞬間に過去の枠が一瞬見えるのを避けるため。
+	listen("hidden-to-tray", () => {
+		showCurrentWindows();
 	});
 	// トレイメニューの図柄選択から届く合図。Rust 側が設定を保存済みのため、ここでは手元の設定値と設定画面のピッカー表示だけを合わせ、保存はし直さない。
 	listen("tray-style-changed", (event) => {

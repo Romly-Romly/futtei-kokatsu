@@ -19,6 +19,13 @@
 				<!-- 状態行。幅が足りない時に件数だけを丸ごと落とせるよう、最終更新と件数を別々の span に分ける。 -->
 				<span class="status" id="status"><span id="status-main"></span><span class="status-count" id="status-count"></span></span>
 			</div>
+			<!-- すべての利用枠パネルをまとめた画像を共有するボタン。押すと共有先のメニュー(#share-menu)を開く。macOS では自前のキャプションボタン(.titlebar-controls)を隠すため、その外に置く。アイコンは、Windows ではキャプションボタンと同じ Segoe の字形、macOS では OS の共有ボタンの形(四角と上向きの矢印)を SVG で描いたものを出す。 -->
+			<button type="button" class="tb-btn tb-share" id="tb-share" aria-haspopup="menu" aria-expanded="false" aria-label="グラフを共有" title="グラフを共有" data-i18n-aria-label="titlebar.share" data-i18n-title="titlebar.share">
+				<span class="tb-ico tb-ico-win" aria-hidden="true">&#xE72D;</span>
+				<svg class="tb-ico-mac" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+					<path d="M8 1.5v8.5M5.25 4.25 8 1.5l2.75 2.75M5.5 6.5H4.5a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-6a1 1 0 0 0-1-1h-1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" />
+				</svg>
+			</button>
 			<div class="titlebar-controls">
 				<button type="button" class="tb-btn" id="tb-min" aria-label="最小化" title="最小化" data-i18n-aria-label="titlebar.minimize" data-i18n-title="titlebar.minimize"><span class="tb-ico" aria-hidden="true">&#xE921;</span></button>
 				<button type="button" class="tb-btn" id="tb-max" aria-label="最大化" title="最大化" data-i18n-aria-label="titlebar.maximize" data-i18n-title="titlebar.maximize"><span class="tb-ico" aria-hidden="true">&#xE922;</span></button>
@@ -184,6 +191,18 @@
 					<div class="card">
 						<div class="row">
 							<div class="row-text">
+								<div class="row-title" data-i18n="settings.misskey.title"></div>
+								<div class="row-desc" data-i18n="settings.misskey.desc"></div>
+							</div>
+							<div class="row-control">
+								<!-- 入力例はサーバー名そのものなので訳さない。 -->
+								<input type="text" class="text-input" id="misskey-host" placeholder="misskey.io" spellcheck="false" autocomplete="off" />
+							</div>
+						</div>
+					</div>
+					<div class="card">
+						<div class="row">
+							<div class="row-text">
 								<div class="row-title" data-i18n="settings.errorlog.title"></div>
 								<div class="row-desc" data-i18n="settings.errorlog.desc"></div>
 							</div>
@@ -219,11 +238,38 @@
 				<div class="ctx-submenu" id="palette-submenu" role="menu" hidden></div>
 			</div>
 			<div class="ctx-sep" role="separator"></div>
+			<!-- グラフの画像のコピー・保存・共有をまとめたフライアウト。右クリックした位置のグラフを対象にする項目(このグラフ)と、すべてのグラフを対象にする項目を区切り線で分ける。data-scope="chart" の項目と区切り線は、グラフの上で開いた時だけ main.js が表示する。共有の項目は、右クリックした位置に共有メニュー(#share-menu)を開く。 -->
+			<div class="ctx-sub" role="none">
+				<button type="button" class="ctx-item ctx-has-sub" role="menuitem" data-action="share" aria-haspopup="true" aria-expanded="false">
+					<span data-i18n="menu.share">共有</span>
+					<span class="ctx-sub-arrow" aria-hidden="true">&#x25B8;</span>
+				</button>
+				<div class="ctx-submenu" role="menu" hidden>
+					<button type="button" class="ctx-item" role="menuitem" data-action="copy-chart" data-scope="chart" data-i18n="menu.copyChart">このグラフを画像でコピー</button>
+					<button type="button" class="ctx-item" role="menuitem" data-action="save-chart" data-scope="chart" data-i18n="menu.saveChart">このグラフを画像で保存…</button>
+					<button type="button" class="ctx-item" role="menuitem" data-action="share-chart" data-scope="chart" data-i18n="menu.shareChart">このグラフを共有…</button>
+					<div class="ctx-sep" role="separator" data-scope="chart"></div>
+					<button type="button" class="ctx-item" role="menuitem" data-action="copy-all" data-i18n="menu.copyAll">すべてのグラフを画像でコピー</button>
+					<button type="button" class="ctx-item" role="menuitem" data-action="save-all" data-i18n="menu.saveAll">すべてのグラフを画像で保存…</button>
+					<button type="button" class="ctx-item" role="menuitem" data-action="share-all" data-i18n="menu.shareAll">すべてのグラフを共有…</button>
+				</div>
+			</div>
+			<div class="ctx-sep" role="separator"></div>
 			<button type="button" class="ctx-item" role="menuitem" data-action="close">
 				<span data-i18n="menu.close">ウィンドウを閉じる</span>
 				<span class="ctx-shortcut" aria-hidden="true">Ctrl+W</span>
 			</button>
 			<button type="button" class="ctx-item" role="menuitem" data-action="quit" data-i18n="menu.quit">終了</button>
 		</nav>
+		<!-- 共有先のメニュー。タイトルバーの共有ボタンと、右クリックメニューの共有の項目から開き、main.js の openShareMenu が位置を当てて表示する。見た目は右クリックメニューと同じ。投稿画面をブラウザで開く SNS と、OS の共有シートを区切り線で分ける。 -->
+		<nav id="share-menu" class="context-menu" role="menu" tabindex="-1" hidden>
+			<button type="button" class="ctx-item" role="menuitem" data-share="x" data-i18n="share.x">X に投稿…</button>
+			<button type="button" class="ctx-item" role="menuitem" data-share="threads" data-i18n="share.threads">Threads に投稿…</button>
+			<button type="button" class="ctx-item" role="menuitem" data-share="misskey" data-i18n="share.misskey">Misskey に投稿…</button>
+			<div class="ctx-sep" role="separator"></div>
+			<button type="button" class="ctx-item" role="menuitem" data-share="system" data-i18n="share.system">その他のアプリで共有…</button>
+		</nav>
+		<!-- 画像の書き出しなど、操作の結果を短く知らせる通知。main.js の showToast が文言を入れて一定時間だけ表示する。 -->
+		<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 	</body>
 </html>

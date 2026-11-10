@@ -66,7 +66,7 @@ struct Sample {
 }
 
 
-// 設定ウィンドウで操作する永続設定。theme と language は将来の全面ローカライズも見据えて文字列で持つ。show_trend は消費傾向ヒートマップの表示有無、date_format は日付の表示形式、heat_palette は消費傾向ヒートマップの配色(standard/parula/turbo/gray)。tray_style はトレイ(メニューバー)アイコンの図柄で "burndown-session"(セッション枠の簡易バーンダウン)・"burndown-week"(週次全モデル枠の簡易バーンダウン)・"burndown-week-fable"(週次 Fable 枠の簡易バーンダウン)・"gauge"(リング＋扇形のゲージ)のいずれか。hide_on_blur はウィンドウがフォーカスを失った時に自動でトレイへ隠すか。serde(default) を付け、項目が増えても古い設定ファイルが読めるようにする。
+// 設定ウィンドウで操作する永続設定。theme と language は将来の全面ローカライズも見据えて文字列で持つ。show_trend は消費傾向ヒートマップの表示有無、date_format は日付の表示形式、heat_palette は消費傾向ヒートマップの配色(standard/parula/turbo/gray)。tray_style はトレイ(メニューバー)アイコンの図柄で "burndown-session"(セッション枠の簡易バーンダウン)・"burndown-week"(週次全モデル枠の簡易バーンダウン)・"burndown-week-fable"(週次 Fable 枠の簡易バーンダウン)・"gauge"(リング＋扇形のゲージ)のいずれか。hide_on_blur はウィンドウがフォーカスを失った時に自動でトレイへ隠すか。misskey_host は、グラフの画像を Misskey へ投稿する時に投稿画面を開くサーバーで、利用者の入力をそのまま持つ(空なら未設定)。serde(default) を付け、項目が増えても古い設定ファイルが読めるようにする。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
@@ -77,6 +77,7 @@ struct Settings {
 	heat_palette: String,
 	tray_style: String,
 	hide_on_blur: bool,
+	misskey_host: String,
 }
 
 impl Default for Settings {
@@ -89,6 +90,7 @@ impl Default for Settings {
 			heat_palette: "standard".to_string(),
 			tray_style: "burndown-session".to_string(),
 			hide_on_blur: false,
+			misskey_host: String::new(),
 		}
 	}
 }
@@ -575,6 +577,10 @@ fn apply_theme(app: &tauri::AppHandle, settings: &Settings) {
 // フォーカスを失った時に自動でトレイへ隠す設定の現在値。フォーカス変化イベントのたびに設定ファイルを読み直さずに済むよう、起動時と設定保存時にここへ写し取り、ウィンドウイベントハンドラからはこの値を見る。
 static HIDE_ON_BLUR: AtomicBool = AtomicBool::new(false);
 
+// Windows の共有 UI を開いている間は真。共有 UI が前面に出るとウィンドウはフォーカスを失い、フォーカスを失った時に隠す設定ではウィンドウと一緒に共有 UI まで閉じてしまうため、この間はウィンドウを隠さない。
+// 共有 UI を開く時に立て、共有が終わった時・取り消された時と、ウィンドウがフォーカスを取り戻した時に落とす。
+static SHARE_UI_OPEN: AtomicBool = AtomicBool::new(false);
+
 
 
 
@@ -828,12 +834,740 @@ fn app_version(app: tauri::AppHandle) -> String {
 
 
 
+// invoke の生バイナリで送られた本文を返す。JSON の引数で呼ばれた場合はエラーを返す。
+fn raw_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a [u8], String> {
+	match request.body() {
+		tauri::ipc::InvokeBody::Raw(bytes) => Ok(bytes),
+		_ => Err("画像のバイト列が渡されていません".to_string()),
+	}
+}
+
+
+
+
+
+
+
+
+
+
+// フロントが描いたグラフの PNG 画像を、保存ダイアログで選ばれたファイルへ書き込むコマンド。
+// 画像は invoke の生バイナリで、既定のファイル名は x-file-name ヘッダで受け取る。保存したら true、ダイアログが取り消されたら false を返す。
+#[tauri::command]
+async fn save_image(
+	window: tauri::WebviewWindow,
+	request: tauri::ipc::Request<'_>,
+) -> Result<bool, String> {
+	let png = raw_body(&request)?;
+	let file_name = request
+		.headers()
+		.get("x-file-name")
+		.and_then(|v| v.to_str().ok())
+		.unwrap_or("image.png");
+	let Some(mut path) = pick_save_path(&window, file_name).await? else {
+		return Ok(false);
+	};
+
+	// 拡張子を消して名前を付けられた場合も PNG と分かるよう、拡張子が無ければ .png を補う。
+	if path.extension().is_none() {
+		path.set_extension("png");
+	}
+	fs::write(&path, png).map_err(|e| format!("画像の保存に失敗しました: {}", e))?;
+	Ok(true)
+}
+
+
+
+
+
+
+
+
+
+
+// PNG 画像の保存先を保存ダイアログで選ばせ、選ばれたパスを返す。file_name は既定のファイル名。取り消されたら None を返す。
+// ダイアログは window を親にして開く。async コマンドから非同期のダイアログとして開くため、表示中もメインスレッドを塞がない。
+#[cfg(not(target_os = "macos"))]
+async fn pick_save_path(
+	window: &tauri::WebviewWindow,
+	file_name: &str,
+) -> Result<Option<PathBuf>, String> {
+	let file = rfd::AsyncFileDialog::new()
+		.set_parent(window)
+		.set_file_name(file_name)
+		.add_filter("PNG", &["png"])
+		.save_file()
+		.await;
+	Ok(file.map(|file| file.path().to_path_buf()))
+}
+
+
+
+
+
+
+
+
+
+
+// PNG 画像の保存先を保存ダイアログで選ばせ、選ばれたパスを返す。file_name は既定のファイル名。取り消されたら None を返す。
+// macOS では、rfd の非同期のダイアログはウィンドウに付くシートとして開かれるが、このアプリのウィンドウではシートが表示されず結果も返らない。そのため親を指定せず、独立したモーダルのダイアログとして開く。表示中はメインウィンドウを操作できない。
+// rfd の同期のダイアログは閉じられるまで呼び出したスレッドを待たせるため、ブロッキング用のスレッドから呼ぶ。
+#[cfg(target_os = "macos")]
+async fn pick_save_path(
+	_window: &tauri::WebviewWindow,
+	file_name: &str,
+) -> Result<Option<PathBuf>, String> {
+	let file_name = file_name.to_string();
+	tauri::async_runtime::spawn_blocking(move || {
+		rfd::FileDialog::new()
+			.set_file_name(file_name)
+			.add_filter("PNG", &["png"])
+			.save_file()
+	})
+	.await
+	.map_err(|e| format!("保存ダイアログを開けませんでした: {}", e))
+}
+
+
+
+
+
+
+
+
+
+
+// フロントが描いたグラフの PNG 画像をクリップボードへ置くコマンド。画像は invoke の生バイナリで受け取る。
+// クリップボードへは展開した画素も置くため、PNG を展開してから set_clipboard_image へ渡す。
+#[tauri::command]
+async fn copy_image(
+	window: tauri::WebviewWindow,
+	request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+	let png = raw_body(&request)?;
+	let pixmap = tiny_skia::Pixmap::decode_png(png)
+		.map_err(|e| format!("画像の展開に失敗しました: {}", e))?;
+	set_clipboard_image(&window, png, &pixmap)
+}
+
+
+
+
+
+
+
+
+
+
+// クリップボードの中身を画像に置き換える。PNG を読めるアプリと DIB しか読めないアプリの両方へ貼り付けられるよう、PNG 形式には png をそのまま、CF_DIBV5 形式には pixmap の画素を置く。
+// クリップボードはメインウィンドウを所有者にして開く。所有者無し(OpenClipboard(NULL))で開くと、EmptyClipboard が所有者を NULL にし、SetClipboardData が ERROR_CLIPBOARD_NOT_OPEN で失敗することがあるため。
+// 画素の並べ替えはこの関数を呼んだスレッドで済ませ、クリップボードの開閉と書き込みは、Win32 のアプリがクリップボードを扱う通例に合わせて、所有者のウィンドウのスレッド(メインスレッド)で行う。
+#[cfg(windows)]
+fn set_clipboard_image(
+	window: &tauri::WebviewWindow,
+	png: &[u8],
+	pixmap: &tiny_skia::Pixmap,
+) -> Result<(), String> {
+	let dib = dibv5_from_pixmap(pixmap);
+	let png = png.to_vec();
+	// HWND は生ポインタで Send でないため、整数にしてメインスレッドへ渡す。
+	let hwnd = window
+		.hwnd()
+		.map_err(|e| format!("ウィンドウハンドルの取得に失敗しました: {}", e))?
+		.0 as isize;
+	let (tx, rx) = std::sync::mpsc::channel();
+	window
+		.run_on_main_thread(move || {
+			let _ = tx.send(write_clipboard_image(hwnd, &png, &dib));
+		})
+		.map_err(|e| format!("クリップボードへの書き込みを始められませんでした: {}", e))?;
+	rx.recv()
+		.map_err(|_| "クリップボードへの書き込みの結果を受け取れませんでした".to_string())?
+}
+
+
+
+
+
+
+
+
+
+
+// クリップボードを開く試行回数。他のアプリが一時的に開いていると失敗するため、clipboard-win が 5ms 間隔でやり直す。
+#[cfg(windows)]
+const CLIPBOARD_OPEN_ATTEMPTS: usize = 10;
+
+// hwnd のウィンドウを所有者にしてクリップボードを開き、中身を PNG 形式の png と CF_DIBV5 形式の dib に置き換える。
+// 貼り付ける側が先に見つけた形式を使うことがあるため、元の画像そのものである PNG を先に置く。
+#[cfg(windows)]
+fn write_clipboard_image(hwnd: isize, png: &[u8], dib: &[u8]) -> Result<(), String> {
+	let png_format = clipboard_win::register_format("PNG")
+		.ok_or_else(|| "PNG のクリップボード形式を登録できませんでした".to_string())?;
+	let _clipboard = clipboard_win::Clipboard::new_attempts_for(
+		hwnd as *mut std::ffi::c_void,
+		CLIPBOARD_OPEN_ATTEMPTS,
+	)
+	.map_err(|e| format!("クリップボードを開けませんでした: {}", e))?;
+	clipboard_win::empty().map_err(|e| format!("クリップボードを空にできませんでした: {}", e))?;
+	clipboard_win::raw::set_without_clear(png_format.get(), png)
+		.map_err(|e| format!("PNG 形式の画像をクリップボードへ置けませんでした: {}", e))?;
+	clipboard_win::raw::set_without_clear(clipboard_win::formats::CF_DIBV5, dib)
+		.map_err(|e| format!("DIB 形式の画像をクリップボードへ置けませんでした: {}", e))?;
+	Ok(())
+}
+
+
+
+
+
+
+
+
+
+
+// tiny-skia の画像を CF_DIBV5 形式のバイト列(BITMAPV5HEADER と画素列)にする。
+// 画素はストレートアルファの B,G,R,A の順で、行は下から上へ並べる。高さを負にして行を上から並べる指定もあるが、それを読めないアプリがあるため使わない。
+#[cfg(windows)]
+fn dibv5_from_pixmap(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
+	// BITMAPV5HEADER の大きさと、その中で使う定数。
+	const HEADER_SIZE: u32 = 124;
+	const BI_BITFIELDS: u32 = 3;
+	const LCS_SRGB: u32 = 0x7352_4742;
+	const LCS_GM_IMAGES: u32 = 4;
+
+	let width = pixmap.width();
+	let height = pixmap.height();
+	let image_size = width * height * 4;
+	let mut dib = Vec::with_capacity((HEADER_SIZE + image_size) as usize);
+	dib.extend_from_slice(&HEADER_SIZE.to_le_bytes()); // bV5Size
+	dib.extend_from_slice(&(width as i32).to_le_bytes()); // bV5Width
+	dib.extend_from_slice(&(height as i32).to_le_bytes()); // bV5Height。正の値は行が下から上へ並ぶことを表す
+	dib.extend_from_slice(&1u16.to_le_bytes()); // bV5Planes
+	dib.extend_from_slice(&32u16.to_le_bytes()); // bV5BitCount
+	dib.extend_from_slice(&BI_BITFIELDS.to_le_bytes()); // bV5Compression
+	dib.extend_from_slice(&image_size.to_le_bytes()); // bV5SizeImage
+	dib.extend_from_slice(&[0; 16]); // bV5XPelsPerMeter・bV5YPelsPerMeter・bV5ClrUsed・bV5ClrImportant
+	dib.extend_from_slice(&0x00ff_0000u32.to_le_bytes()); // bV5RedMask
+	dib.extend_from_slice(&0x0000_ff00u32.to_le_bytes()); // bV5GreenMask
+	dib.extend_from_slice(&0x0000_00ffu32.to_le_bytes()); // bV5BlueMask
+	dib.extend_from_slice(&0xff00_0000u32.to_le_bytes()); // bV5AlphaMask
+	dib.extend_from_slice(&LCS_SRGB.to_le_bytes()); // bV5CSType
+	dib.extend_from_slice(&[0; 48]); // bV5Endpoints(36B)・bV5GammaRed・bV5GammaGreen・bV5GammaBlue(各4B)
+	dib.extend_from_slice(&LCS_GM_IMAGES.to_le_bytes()); // bV5Intent
+	dib.extend_from_slice(&[0; 12]); // bV5ProfileData・bV5ProfileSize・bV5Reserved
+	debug_assert_eq!(dib.len(), HEADER_SIZE as usize);
+
+	for row in pixmap.pixels().chunks_exact(width as usize).rev() {
+		for px in row {
+			let c = px.demultiply();
+			dib.extend_from_slice(&[c.blue(), c.green(), c.red(), c.alpha()]);
+		}
+	}
+	dib
+}
+
+
+
+
+
+
+
+
+
+
+// クリップボードの中身を画像に置き換える。arboard へは乗算済みでない RGBA の画素列で渡す。
+#[cfg(not(windows))]
+fn set_clipboard_image(
+	_window: &tauri::WebviewWindow,
+	_png: &[u8],
+	pixmap: &tiny_skia::Pixmap,
+) -> Result<(), String> {
+	let image = arboard::ImageData {
+		width: pixmap.width() as usize,
+		height: pixmap.height() as usize,
+		bytes: demultiply_rgba(pixmap).into(),
+	};
+	arboard::Clipboard::new()
+		.and_then(|mut clipboard| clipboard.set_image(image))
+		.map_err(|e| format!("クリップボードへのコピーに失敗しました: {}", e))
+}
+
+
+
+
+
+
+
+
+
+
+// SNS の投稿画面を、本文 text を入れた状態で既定のブラウザに開くコマンド。service は "x"・"threads"・"misskey" のいずれかで、"misskey" は host に投稿画面を開くサーバーを受け取る。
+// 投稿画面へは URL で画像を渡せないため、画像はフロントが先にクリップボードへ置いておく。
+#[tauri::command]
+fn open_share_page(service: String, host: Option<String>, text: String) -> Result<(), String> {
+	let url = share_page_url(&service, host.as_deref(), &text)?;
+	open::that_detached(url).map_err(|e| format!("ブラウザの起動に失敗しました: {}", e))
+}
+
+
+
+
+
+
+
+
+
+
+// SNS の投稿画面の URL を、本文 text を入れて組み立てる。service と host は open_share_page と同じ。
+fn share_page_url(service: &str, host: Option<&str>, text: &str) -> Result<String, String> {
+	let base = match service {
+		"x" => "https://x.com/intent/tweet".to_string(),
+		"threads" => "https://www.threads.com/intent/post".to_string(),
+		"misskey" => format!("https://{}/share", share_host(host.unwrap_or(""))?),
+		_ => return Err(format!("未知の共有先です: {}", service)),
+	};
+	// 空白は + ではなく %20 にする。+ を空白と読むかは受け取る側次第のため、どの投稿画面でも同じに読める形にそろえる。
+	let encoded = percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC);
+	Ok(format!("{}?text={}", base, encoded))
+}
+
+
+
+
+
+
+
+
+
+
+// 設定に入力されたサーバーの指定から、ホスト名(ポートの指定があればそれも)を取り出す。"misskey.io" のようなホスト名のほか、"https://misskey.io/@user" のような URL も受け付ける。
+fn share_host(input: &str) -> Result<String, String> {
+	let trimmed = input.trim();
+	if trimmed.is_empty() {
+		return Err("サーバーが設定されていません".to_string());
+	}
+	let with_scheme = if trimmed.contains("://") {
+		trimmed.to_string()
+	} else {
+		format!("https://{}", trimmed)
+	};
+	let url = tauri::Url::parse(&with_scheme)
+		.map_err(|_| format!("サーバーの指定を解釈できません: {}", trimmed))?;
+	let host = url
+		.host_str()
+		.filter(|h| !h.is_empty())
+		.ok_or_else(|| format!("サーバーの指定を解釈できません: {}", trimmed))?;
+	match url.port() {
+		Some(port) => Ok(format!("{}:{}", host, port)),
+		None => Ok(host.to_string()),
+	}
+}
+
+
+
+
+
+
+
+
+
+
+// 指定のヘッダの値を、パーセントエンコードを解いた文字列にして返す。ヘッダが無ければ空文字列を返す。ヘッダの値には ASCII しか使えないため、日本語を含む文言はフロントがパーセントエンコードして送る。
+fn header_text(request: &tauri::ipc::Request<'_>, name: &str) -> Result<String, String> {
+	let Some(value) = request.headers().get(name) else {
+		return Ok(String::new());
+	};
+	let value = value
+		.to_str()
+		.map_err(|_| format!("{} ヘッダを読めませんでした", name))?;
+	percent_encoding::percent_decode_str(value)
+		.decode_utf8()
+		.map(|s| s.into_owned())
+		.map_err(|_| format!("{} ヘッダを読めませんでした", name))
+}
+
+
+
+
+
+
+
+
+
+
+// フロントが描いたグラフの PNG 画像を、OS の共有シート(Windows の共有 UI・macOS の共有メニュー)で共有するコマンド。
+// 画像は invoke の生バイナリで受け取り、共有シートへはファイルとして渡すため、アプリのキャッシュディレクトリへ書き出してから渡す。
+// ヘッダで受け取るもの: x-file-name は書き出すファイル名、x-share-title と x-share-text は共有する題名と本文(パーセントエンコード)、x-anchor は共有メニューを出す位置で、ウィンドウの表示領域の左上を原点とする CSS ピクセルの "x,y,幅,高さ"。
+#[tauri::command]
+async fn share_image(
+	window: tauri::WebviewWindow,
+	request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+	let png = raw_body(&request)?;
+	let file_name = request
+		.headers()
+		.get("x-file-name")
+		.and_then(|v| v.to_str().ok())
+		.unwrap_or("image.png");
+	let title = header_text(&request, "x-share-title")?;
+	let text = header_text(&request, "x-share-text")?;
+	let anchor = parse_anchor(&header_text(&request, "x-anchor")?);
+	let path = write_share_file(window.app_handle(), file_name, png)?;
+	show_share_sheet(&window, path, title, text, anchor)
+}
+
+
+
+
+
+
+
+
+
+
+// "x,y,幅,高さ" 形式の位置を [x, y, 幅, 高さ] にする。解釈できない成分は 0 とみなす。
+fn parse_anchor(text: &str) -> [f64; 4] {
+	let mut anchor = [0.0; 4];
+	for (slot, part) in anchor.iter_mut().zip(text.split(',')) {
+		*slot = part.trim().parse().unwrap_or(0.0);
+	}
+	anchor
+}
+
+
+
+
+
+
+
+
+
+
+// 共有シートへ渡す画像を、アプリのキャッシュディレクトリの share フォルダへ書き出してパスを返す。
+// 共有先のアプリは共有シートを閉じた後でもファイルを読みに来ることがあるため、書き出したファイルはすぐには消さず、次に共有する時に前回までのものを消す。
+fn write_share_file(
+	app: &tauri::AppHandle,
+	file_name: &str,
+	png: &[u8],
+) -> Result<PathBuf, String> {
+	let dir = app
+		.path()
+		.app_cache_dir()
+		.map_err(|e| format!("キャッシュディレクトリを得られませんでした: {}", e))?
+		.join("share");
+	if let Ok(entries) = fs::read_dir(&dir) {
+		for entry in entries.flatten() {
+			let _ = fs::remove_file(entry.path());
+		}
+	}
+	fs::create_dir_all(&dir).map_err(|e| format!("ディレクトリの作成に失敗しました: {}", e))?;
+
+	// ファイル名はヘッダで受け取るため、ディレクトリの部分を除き、share フォルダの外を指せないようにする。
+	let name = Path::new(file_name)
+		.file_name()
+		.ok_or_else(|| "共有する画像のファイル名が不正です".to_string())?;
+	let path = dir.join(name);
+	fs::write(&path, png).map_err(|e| format!("共有する画像の書き出しに失敗しました: {}", e))?;
+	Ok(path)
+}
+
+
+
+
+
+
+
+
+
+
+// Windows の共有 UI を開き、path の画像と本文 text を渡す。共有 UI の表示はウィンドウのスレッド(メインスレッド)で行う必要があるため、そちらへ回して結果を待つ。anchor は使わない(共有 UI の位置は OS が決める)。
+#[cfg(windows)]
+fn show_share_sheet(
+	window: &tauri::WebviewWindow,
+	path: PathBuf,
+	title: String,
+	text: String,
+	_anchor: [f64; 4],
+) -> Result<(), String> {
+	// HWND は生ポインタで Send でないため、整数にしてメインスレッドへ渡す。
+	let hwnd = window
+		.hwnd()
+		.map_err(|e| format!("ウィンドウハンドルの取得に失敗しました: {}", e))?
+		.0 as isize;
+	let app = window.app_handle().clone();
+	let (tx, rx) = std::sync::mpsc::channel();
+	window
+		.run_on_main_thread(move || {
+			let result = show_windows_share_ui(app, hwnd, &path, &title, &text)
+				.map_err(|e| format!("共有 UI を開けませんでした: {}", e));
+			let _ = tx.send(result);
+		})
+		.map_err(|e| format!("共有 UI の表示を始められませんでした: {}", e))?;
+	rx.recv()
+		.map_err(|_| "共有 UI の表示の結果を受け取れませんでした".to_string())?
+}
+
+
+
+
+
+
+
+
+
+
+// 共有 UI へ渡すデータを用意する DataRequested ハンドラの登録。DataTransferManager はウィンドウごとに1つで登録が積み重なるため、共有のたびに前回の登録を外してから登録し直す。
+#[cfg(windows)]
+static SHARE_REQUEST_TOKEN: Mutex<Option<i64>> = Mutex::new(None);
+
+// hwnd のウィンドウに Windows の共有 UI を開く。共有 UI がデータを求めてきたら、fill_share_data で題名 title・本文 text と path の画像を渡す。
+// 共有 UI を開いている間は SHARE_UI_OPEN を立て、フォーカスを失ってもウィンドウを隠さないようにする。
+#[cfg(windows)]
+fn show_windows_share_ui(
+	app: tauri::AppHandle,
+	hwnd: isize,
+	path: &Path,
+	title: &str,
+	text: &str,
+) -> windows::core::Result<()> {
+	use windows::core::{AgileReference, HSTRING};
+	use windows::ApplicationModel::DataTransfer::{DataRequestedEventArgs, DataTransferManager};
+	use windows::Foundation::TypedEventHandler;
+	use windows::Storage::StorageFile;
+	use windows::Win32::Foundation::HWND;
+	use windows::Win32::UI::Shell::IDataTransferManagerInterop;
+
+	let hwnd = HWND(hwnd as *mut std::ffi::c_void);
+	let file = StorageFile::GetFileFromPathAsync(&HSTRING::from(path))?.get()?;
+	// StorageFile は Send でなく、Send を求めるハンドラへそのまま持ち込めないため、AgileReference に包んでハンドラの中で取り出す。
+	let file = AgileReference::new(&file)?;
+	let title = HSTRING::from(title);
+	let text = HSTRING::from(text);
+
+	let interop = windows::core::factory::<DataTransferManager, IDataTransferManagerInterop>()?;
+	let manager: DataTransferManager = unsafe { interop.GetForWindow(hwnd)? };
+	let mut token = SHARE_REQUEST_TOKEN
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	if let Some(previous) = token.take() {
+		let _ = manager.RemoveDataRequested(previous);
+	}
+	let handler =
+		TypedEventHandler::<DataTransferManager, DataRequestedEventArgs>::new(move |_, args| {
+			let result = args
+				.ok()
+				.and_then(|args| fill_share_data(args, &file, &title, &text));
+			// ここでの失敗は共有 UI へ返すだけでは記録が残らず、後から原因を追えないため、エラーログへ残す。
+			// 共有は続けられないため、隠さない扱いも解く。
+			if let Err(e) = &result {
+				SHARE_UI_OPEN.store(false, Ordering::Relaxed);
+				log_error(
+					&app,
+					&format!("共有 UI へ渡すデータの用意に失敗しました: {}", e),
+				);
+			}
+			result
+		});
+	*token = Some(manager.DataRequested(&handler)?);
+
+	SHARE_UI_OPEN.store(true, Ordering::Relaxed);
+	let shown = unsafe { interop.ShowShareUIForWindow(hwnd) };
+	if shown.is_err() {
+		SHARE_UI_OPEN.store(false, Ordering::Relaxed);
+	}
+	shown
+}
+
+
+
+
+
+
+
+
+
+
+// 共有 UI が求めてきたデータ(args)に、題名 title・本文 text と、file の画像をビットマップとファイルの両方で入れる。共有先のアプリによって受け取れる形式が違うため。
+// 共有が終わった時と取り消された時に SHARE_UI_OPEN を落とすよう、その通知も受け取る。
+#[cfg(windows)]
+fn fill_share_data(
+	args: &windows::ApplicationModel::DataTransfer::DataRequestedEventArgs,
+	file: &windows::core::AgileReference<windows::Storage::StorageFile>,
+	title: &windows::core::HSTRING,
+	text: &windows::core::HSTRING,
+) -> windows::core::Result<()> {
+	use windows::core::{IInspectable, Interface};
+	use windows::ApplicationModel::DataTransfer::{DataPackage, ShareCompletedEventArgs};
+	use windows::Foundation::TypedEventHandler;
+	use windows::Storage::IStorageItem;
+	use windows::Storage::Streams::RandomAccessStreamReference;
+
+	let data = args.Request()?.Data()?;
+	// 通知を受け取れない Windows でも共有はできるよう、登録の失敗は無視する。
+	// その場合はウィンドウがフォーカスを取り戻した時に SHARE_UI_OPEN を落とす。
+	let _ = data.ShareCompleted(
+		&TypedEventHandler::<DataPackage, ShareCompletedEventArgs>::new(|_, _| {
+			SHARE_UI_OPEN.store(false, Ordering::Relaxed);
+			Ok(())
+		}),
+	);
+	let _ = data.ShareCanceled(&TypedEventHandler::<DataPackage, IInspectable>::new(
+		|_, _| {
+			SHARE_UI_OPEN.store(false, Ordering::Relaxed);
+			Ok(())
+		},
+	));
+
+	data.Properties()?.SetTitle(title)?;
+	data.SetText(text)?;
+	let file = file.resolve()?;
+	data.SetBitmap(&RandomAccessStreamReference::CreateFromFile(&file)?)?;
+	let items = windows_collections::IIterable::<IStorageItem>::from(vec![Some(
+		file.cast::<IStorageItem>()?,
+	)]);
+	data.SetStorageItemsReadOnly(&items)?;
+	Ok(())
+}
+
+
+
+
+
+
+
+
+
+
+// macOS の共有メニュー(NSSharingServicePicker)を開き、path の画像と本文 text を渡す。AppKit はメインスレッドでしか扱えないため、そちらへ回して結果を待つ。
+// メニューは anchor(ウィンドウの表示領域の左上を原点とする CSS ピクセルの [x, y, 幅, 高さ])の下に出す。題名は共有メニューに渡す先が無いため使わない。
+#[cfg(target_os = "macos")]
+fn show_share_sheet(
+	window: &tauri::WebviewWindow,
+	path: PathBuf,
+	_title: String,
+	text: String,
+	anchor: [f64; 4],
+) -> Result<(), String> {
+	// NSView のポインタは Send でないため、整数にしてメインスレッドへ渡す。
+	let view = window
+		.ns_view()
+		.map_err(|e| format!("ウィンドウのビューの取得に失敗しました: {}", e))? as usize;
+	let (tx, rx) = std::sync::mpsc::channel();
+	window
+		.run_on_main_thread(move || {
+			let _ = tx.send(show_mac_share_picker(view, &path, &text, anchor));
+		})
+		.map_err(|e| format!("共有メニューの表示を始められませんでした: {}", e))?;
+	rx.recv()
+		.map_err(|_| "共有メニューの表示の結果を受け取れませんでした".to_string())?
+}
+
+
+
+
+
+
+
+
+
+
+// 表示中の共有メニュー。AppKit が表示を終える前に解放されないよう、次に共有するまで持っておく。メインスレッドでしか触らない。
+#[cfg(target_os = "macos")]
+thread_local! {
+	static SHARE_PICKER: std::cell::RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSSharingServicePicker>>> =
+		const { std::cell::RefCell::new(None) };
+}
+
+// view の NSView を基準に、anchor の位置の下へ共有メニューを開く。メインスレッドで呼ぶこと。
+#[cfg(target_os = "macos")]
+fn show_mac_share_picker(
+	view: usize,
+	path: &Path,
+	text: &str,
+	anchor: [f64; 4],
+) -> Result<(), String> {
+	use objc2::runtime::AnyObject;
+	use objc2::AllocAnyThread;
+	use objc2_app_kit::{NSSharingServicePicker, NSView};
+	use objc2_foundation::{NSArray, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSURL};
+
+	let url = NSURL::from_file_path(path)
+		.ok_or_else(|| "共有する画像のパスを URL にできませんでした".to_string())?;
+	let text = NSString::from_str(text);
+	let items: [&AnyObject; 2] = [&url, &text];
+	let items = NSArray::from_slice(&items);
+	let picker =
+		unsafe { NSSharingServicePicker::initWithItems(NSSharingServicePicker::alloc(), &items) };
+
+	// SAFETY: view は tauri が返したメインウィンドウの NSView のポインタで、この関数はメインスレッドで呼ばれる。
+	let view: &NSView = unsafe { &*(view as *const NSView) };
+	// anchor は表示領域の上端からの位置。NSView の座標系は既定では下端が原点なので、反転していないビューでは上下を入れ替える。メニューは見た目の下側に出したいため、出す辺も座標系に合わせて選ぶ。
+	let [x, y, width, height] = anchor;
+	let (y, edge) = if view.isFlipped() {
+		(y, NSRectEdge::MaxY)
+	} else {
+		(view.bounds().size.height - y - height, NSRectEdge::MinY)
+	};
+	let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
+	picker.showRelativeToRect_ofView_preferredEdge(rect, view, edge);
+	SHARE_PICKER.with(|slot| *slot.borrow_mut() = Some(picker));
+	Ok(())
+}
+
+
+
+
+
+
+
+
+
+
+// Windows・macOS 以外では共有シートに対応しない。
+#[cfg(not(any(windows, target_os = "macos")))]
+fn show_share_sheet(
+	_window: &tauri::WebviewWindow,
+	_path: PathBuf,
+	_title: String,
+	_text: String,
+	_anchor: [f64; 4],
+) -> Result<(), String> {
+	Err("このプラットフォームでは共有シートに対応していません".to_string())
+}
+
+
+
+
+
+
+
+
+
+
 // メインウィンドウを表示して前面に出す。トレイからの復帰に使う。
 fn show_main_window(app: &tauri::AppHandle) {
 	if let Some(window) = app.get_webview_window("main") {
 		let _ = window.show();
 		let _ = window.set_focus();
 	}
+}
+
+
+
+
+
+
+
+
+
+
+// ウィンドウの現在の配置を保存してからトレイへ畳み、畳んだことをフロントへ hidden-to-tray で知らせる。
+fn hide_to_tray(window: &tauri::Window) {
+	romly_tauri_common::window_state::save(window.app_handle());
+	let _ = window.hide();
+	let _ = window.app_handle().emit("hidden-to-tray", ());
 }
 
 
@@ -1115,7 +1849,7 @@ const BURN_NOW_COLOR: [u8; 4] = [240, 244, 252, 255];
 
 
 
-// tiny-skia の乗算済みアルファ画素を、トレイやウィンドウのアイコンが前提とするストレートアルファへ戻し、R,G,B,A の順の RGBA バイト列にして返す。
+// tiny-skia の乗算済みアルファの画素をストレートアルファへ戻し、R,G,B,A の順に並べたバイト列にして返す。
 fn demultiply_rgba(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
 	let mut rgba = Vec::with_capacity((pixmap.width() * pixmap.height() * 4) as usize);
 	for px in pixmap.pixels() {
@@ -1931,10 +2665,14 @@ pub fn run() {
 			// 窓を閉じる操作ではプロセスを終了させず、現在の配置を保存してからトレイへ隠して計測を継続する。
 			tauri::WindowEvent::CloseRequested { api, .. } => {
 				api.prevent_close();
-				romly_tauri_common::window_state::save(window.app_handle());
-				let _ = window.hide();
+				hide_to_tray(window);
 			}
-			// フォーカスを失った時に自動でトレイへ隠す設定が有効なら、閉じる操作と同じく配置を保存してから隠し、計測を継続する。ただし枠なしウィンドウの縁を掴んでリサイズを始めると、窓は前面のままなのに一過性のフォーカス喪失イベントが飛ぶ。それで畳むとリサイズできないため、BLUR_HIDE_GRACE だけ待ってから改めてフォーカス状態を見て、本当に前面を失ったままの時だけ畳む。リサイズ中は自分が前面(is_focused が true)なので畳まれず、他アプリへ切り替えた本物の喪失だけが畳まれる。表示中で最小化していない時だけ隠し、既に隠れている時やトレイへ畳んだ直後の余分な発火では何もしない。
+			// フォーカスを失った時に自動でトレイへ隠す設定が有効なら、閉じる操作と同じく配置を保存してから隠し、計測を継続する。
+			// ただし枠なしウィンドウの縁を掴んでリサイズを始めると、窓は前面のままなのに一過性のフォーカス喪失イベントが飛ぶ。
+			// それで畳むとリサイズできないため、BLUR_HIDE_GRACE だけ待ってから改めてフォーカス状態を見て、本当に前面を失ったままの時だけ畳む。
+			// リサイズ中は自分が前面(is_focused が true)なので畳まれず、他アプリへ切り替えた本物の喪失だけが畳まれる。
+			// 表示中で最小化していない時だけ隠し、既に隠れている時やトレイへ畳んだ直後の余分な発火では何もしない。
+			// Windows の共有 UI を開いている間(SHARE_UI_OPEN が真の間)は、隠すと共有 UI まで閉じてしまうため畳まない。
 			tauri::WindowEvent::Focused(false) if HIDE_ON_BLUR.load(Ordering::Relaxed) => {
 				let window = window.clone();
 				std::thread::spawn(move || {
@@ -1942,15 +2680,19 @@ pub fn run() {
 					let app = window.app_handle().clone();
 					let _ = app.run_on_main_thread(move || {
 						if HIDE_ON_BLUR.load(Ordering::Relaxed)
+							&& !SHARE_UI_OPEN.load(Ordering::Relaxed)
 							&& !window.is_focused().unwrap_or(false)
 							&& window.is_visible().unwrap_or(false)
 							&& !window.is_minimized().unwrap_or(false)
 						{
-							romly_tauri_common::window_state::save(window.app_handle());
-							let _ = window.hide();
+							hide_to_tray(&window);
 						}
 					});
 				});
+			}
+			// 共有の終了・取り消しの通知が届かない終わり方をしても、隠さない扱いが残り続けないよう、ウィンドウがフォーカスを取り戻した時にも SHARE_UI_OPEN を落とす。
+			tauri::WindowEvent::Focused(true) => {
+				SHARE_UI_OPEN.store(false, Ordering::Relaxed);
 			}
 			_ => {}
 		})
@@ -1965,6 +2707,10 @@ pub fn run() {
 			set_autostart,
 			quit_app,
 			app_version,
+			save_image,
+			copy_image,
+			open_share_page,
+			share_image,
 			gauge_icon_rgba,
 			romly_tauri_common::accent_color,
 			romly_tauri_common::win_minimize,
@@ -2208,5 +2954,76 @@ mod tests {
 		let ws = s.meters.get("week_sonnet").unwrap().as_ref().unwrap();
 		assert_eq!(ws.used_pct, 0);
 		assert_eq!(ws.resets, None);
+	}
+
+
+
+
+	// CF_DIBV5 のバイト列が、BITMAPV5HEADER(124B)に続けて、下の行から順に B,G,R,A の並びで画素を持つこと。
+	#[cfg(windows)]
+	#[test]
+	fn dibv5_puts_rows_bottom_up_in_bgra() {
+		let mut pixmap = tiny_skia::Pixmap::new(2, 2).unwrap();
+		// 上の行の左端を赤、下の行の左端を緑にする。不透明なので乗算済みとストレートアルファの値は一致する。
+		pixmap.pixels_mut()[0] = tiny_skia::ColorU8::from_rgba(255, 0, 0, 255).premultiply();
+		pixmap.pixels_mut()[2] = tiny_skia::ColorU8::from_rgba(0, 255, 0, 255).premultiply();
+
+		let dib = dibv5_from_pixmap(&pixmap);
+		assert_eq!(dib.len(), 124 + 2 * 2 * 4);
+		// 画素列の先頭は下の行の左端(緑)。
+		assert_eq!(&dib[124..128], &[0, 255, 0, 255]);
+		// 3番目の画素は上の行の左端(赤)。
+		assert_eq!(&dib[132..136], &[0, 0, 255, 255]);
+	}
+
+
+
+
+	// 投稿画面の URL へ、本文が空白を %20、# を %23 としてパーセントエンコードされて入ること。
+	#[test]
+	fn builds_share_page_urls() {
+		assert_eq!(
+			share_page_url("x", None, "セッション 42% #払底枯渇").unwrap(),
+			"https://x.com/intent/tweet?text=%E3%82%BB%E3%83%83%E3%82%B7%E3%83%A7%E3%83%B3%2042%25%20%23%E6%89%95%E5%BA%95%E6%9E%AF%E6%B8%87"
+		);
+		assert_eq!(
+			share_page_url("threads", None, "a b").unwrap(),
+			"https://www.threads.com/intent/post?text=a%20b"
+		);
+		assert_eq!(
+			share_page_url("misskey", Some("misskey.io"), "a").unwrap(),
+			"https://misskey.io/share?text=a"
+		);
+		// サーバーの要る共有先でサーバーが空なら、未知の共有先と同じくエラーにする。
+		assert!(share_page_url("misskey", Some(""), "a").is_err());
+		assert!(share_page_url("unknown", None, "a").is_err());
+	}
+
+
+
+
+	// サーバーの指定から、ホスト名とポートだけを取り出すこと。
+	#[test]
+	fn extracts_share_hosts() {
+		assert_eq!(share_host("misskey.io").unwrap(), "misskey.io");
+		assert_eq!(share_host("  https://misskey.io/  ").unwrap(), "misskey.io");
+		assert_eq!(
+			share_host("https://misskey.io/@user").unwrap(),
+			"misskey.io"
+		);
+		assert_eq!(share_host("example.com:8443").unwrap(), "example.com:8443");
+		assert!(share_host("").is_err());
+		assert!(share_host("   ").is_err());
+	}
+
+
+
+
+	// 共有メニューの位置を "x,y,幅,高さ" から読み、解釈できない成分は 0 とみなすこと。
+	#[test]
+	fn parses_share_anchor() {
+		assert_eq!(parse_anchor("10,20.5,30,40"), [10.0, 20.5, 30.0, 40.0]);
+		assert_eq!(parse_anchor("10,abc"), [10.0, 0.0, 0.0, 0.0]);
+		assert_eq!(parse_anchor(""), [0.0; 4]);
 	}
 }
