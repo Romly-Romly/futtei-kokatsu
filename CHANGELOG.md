@@ -2,6 +2,12 @@
 
 > 🌐 **[日本語 →](CHANGELOG.ja.md)**
 
+## [1.5.1] - 2026-11-12
+
+- Fixed copying, saving, and sharing chart images (added in 1.5.0) always failing with an error.
+
+
+
 ## [1.5.0] - 2026-11-11
 
 - Added the ability to copy, save, or share a chart as an image from the chart's right-click menu.

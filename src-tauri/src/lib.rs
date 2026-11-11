@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 Romly
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -834,11 +835,14 @@ fn app_version(app: tauri::AppHandle) -> String {
 
 
 
-// invoke の生バイナリで送られた本文を返す。JSON の引数で呼ばれた場合はエラーを返す。
-fn raw_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a [u8], String> {
+// invoke の本文をバイト列として返す。生バイナリの本文はそのまま返し、JSON の本文は数値の配列ならバイト列に変換して返す。数値の配列でなければエラーを返す。
+// フロントは生バイナリで送るが、Tauri は IPC のカスタムプロトコルへの送信が一度でも失敗すると、以降の invoke を postMessage で送るため、本文が JSON の数値の配列で届くことがある。
+fn raw_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<Cow<'a, [u8]>, String> {
 	match request.body() {
-		tauri::ipc::InvokeBody::Raw(bytes) => Ok(bytes),
-		_ => Err("画像のバイト列が渡されていません".to_string()),
+		tauri::ipc::InvokeBody::Raw(bytes) => Ok(Cow::Borrowed(bytes)),
+		tauri::ipc::InvokeBody::Json(value) => Vec::<u8>::deserialize(value)
+			.map(Cow::Owned)
+			.map_err(|_| "画像のバイト列が渡されていません".to_string()),
 	}
 }
 
@@ -946,9 +950,9 @@ async fn copy_image(
 	request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
 	let png = raw_body(&request)?;
-	let pixmap = tiny_skia::Pixmap::decode_png(png)
+	let pixmap = tiny_skia::Pixmap::decode_png(&png)
 		.map_err(|e| format!("画像の展開に失敗しました: {}", e))?;
-	set_clipboard_image(&window, png, &pixmap)
+	set_clipboard_image(&window, &png, &pixmap)
 }
 
 
@@ -1214,7 +1218,7 @@ async fn share_image(
 	let title = header_text(&request, "x-share-title")?;
 	let text = header_text(&request, "x-share-text")?;
 	let anchor = parse_anchor(&header_text(&request, "x-anchor")?);
-	let path = write_share_file(window.app_handle(), file_name, png)?;
+	let path = write_share_file(window.app_handle(), file_name, &png)?;
 	show_share_sheet(&window, path, title, text, anchor)
 }
 
